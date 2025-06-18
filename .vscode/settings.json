@@ -1,0 +1,14 @@
+{
+  "terminal.integrated.env.linux": {
+    "PATH": "/usr/local/go/bin:/root/go/bin:${env:PATH}",
+    "PROJECT_ENV": "development"
+  },
+  "remote.extensionKind": {
+    "GitHub.copilot": [
+      "ui"
+    ],
+    "GitHub.copilot-chat": [
+      "ui"
+    ]
+  },
+}
