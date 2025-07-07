@@ -5,10 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/PuerkitoBio/goquery"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/gctest"
 	"zgo.at/zdb"
@@ -69,7 +69,7 @@ func TestUserLogin(t *testing.T) {
 	if l := rr.Header().Get("Location"); l != "/" {
 		t.Error(l)
 	}
-	if c := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(c, "key="+ztime.Now().Format("20060102")+"-") {
+	if c := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(c, "key="+ztime.Now(ctx).Format("20060102")+"-") {
 		t.Error(c)
 	}
 }
@@ -176,27 +176,28 @@ func TestUserLoginMFA(t *testing.T) {
 	newBackend(zdb.MustGetDB(ctx)).ServeHTTP(rr, r)
 	ztest.Code(t, rr, 200)
 
-	doc, err := goquery.NewDocumentFromReader(rr.Body)
-	if err != nil {
-		t.Fatal(err)
+	var mac, logintoken string
+	{
+		m := regexp.MustCompile(`<input type="hidden" name="loginmac" value="([^"]+)">`).
+			FindStringSubmatch(rr.Body.String())
+		if len(m) != 2 {
+			t.Fatal()
+		}
+		if m[1] == "" {
+			t.Fatal()
+		}
+		mac = m[1]
 	}
-
-	f := doc.Find(`input[name="loginmac"]`)
-	if f.Length() != 1 {
-		t.Fatalf("no loginmac in %v", f)
-	}
-	mac, ok := f.Attr("value")
-	if !ok {
-		t.Errorf("no value on %v", f)
-	}
-
-	f = doc.Find(`input[name="user_logintoken"]`)
-	if f.Length() != 1 {
-		t.Fatalf("no user_logintoken in %v", f)
-	}
-	logintoken, ok := f.Attr("value")
-	if !ok {
-		t.Errorf("no value on %v", f)
+	{
+		m := regexp.MustCompile(`<input type="hidden" name="user_logintoken" value="([^"]+)">`).
+			FindStringSubmatch(rr.Body.String())
+		if len(m) != 2 {
+			t.Fatal()
+		}
+		if m[1] == "" {
+			t.Fatal()
+		}
+		logintoken = m[1]
 	}
 
 	testTOTP = true
@@ -223,7 +224,7 @@ func TestUserLoginMFA(t *testing.T) {
 	if l := rr.Header().Get("Location"); l != "/" {
 		t.Error(l)
 	}
-	if c := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(c, "key="+ztime.Now().Format("20060102")+"-") {
+	if c := rr.Header().Get("Set-Cookie"); !strings.HasPrefix(c, "key="+ztime.Now(ctx).Format("20060102")+"-") {
 		t.Error(c)
 	}
 }

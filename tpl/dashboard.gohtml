@@ -57,6 +57,7 @@
 	<button type="submit" tabindex="-1" class="hide-btn" aria-label="{{.T "button/submit|Submit"}}"></button>
 	{{if .ShowRefs}}<input type="hidden" name="showrefs" value="{{.ShowRefs}}">{{end}}
 	<input type="hidden" id="hl-period" name="hl-period" value="{{.View.Period}}" disabled>
+	<input type="hidden" id="hl-group" name="group" value="{{.View.Group}}" disabled>
 
 	{{if .User.ID}}
 		<div id="dash-saved-views">
@@ -102,7 +103,8 @@
 				<span>
 					{{.T "nav-dash/current|Current"}} {{/* z18n: as in: "Current [week] [month] ...*/}}
 					<button class="link" name="period" value="week-cur">{{.T "nav-dash/week|week"}}</button> ·
-					<button class="link" name="period" value="month-cur">{{.T "nav-dash/month|month"}}</button>
+					<button class="link" name="period" value="month-cur">{{.T "nav-dash/month|month"}}</button> ·
+					<button class="link" name="period" value="year-cur">{{.T "nav-dash/year|year"}}</button>
 				</span>
 			</span>
 		</div>
@@ -115,13 +117,28 @@
 					title="{{.T "nav-dash/filter-tooltip|Filter the list of paths; matched case-insensitive on path and title"}}"
 					{{if .View.Filter}}class="value"{{end}}>
 			</div>
-			{{if .ForcedDaily}}
-				<label title="{{.T "nav-dash/forced-daily|Cannot use the hourly view for a time range of more than 90 days"}}">
-					<input type="checkbox" name="daily" checked disabled> {{.T "nav-dash/by-day|View by day"}}</label>
-			{{else}}
-				<label><input type="checkbox" name="daily" id="daily" {{if .View.Daily}}checked{{end}}> {{.T "nav-dash/by-day|View by day"}}</label>
-				<input type="hidden" name="daily" value="off">
-			{{end}}
+			{{/* .T "nav-dash/by-day|View by day" */}}
+
+			<span id="dash-select-group" class="group-{{.View.Group}}">
+				{{.T `nav-dash/view-by|View by:`}}
+				  <button class="link" name="group" value="hour"
+					{{if and .ForcedGroup (gt .View.Group 0)}}disabled
+						title="{{.T "nav-dash/forced-daily|Cannot use the hourly view for a time range of more than 90 days"}}"
+					{{end}}
+				  >{{.T "nav-dash/hour|hour"}}</button>
+				· <button class="link" name="group" value="day"
+					{{if and .ForcedGroup (lt .View.Group 1)}}disabled
+						title="{{.T "nav-dash/forced-hourly|Cannot use the daily view for a time range of less than 7 days"}}"
+					{{end}}
+				  >{{.T "nav-dash/day|day"}}</button>
+				{{/*
+				· <button class="link" name="group" value="week"
+					{{if and .ForcedGroup (lt .View.Group 1)}}disabled
+						title="disabled"
+					{{end}}
+				  >{{.T "nav-dash/day|day"}}</button>
+				*/}}
+			</span>
 		</div>
 	</div>
 	<div id="dash-move">
@@ -130,7 +147,8 @@
 			<span>
 				<button class="link" name="move" value="day-b">{{.T "nav-dash/day|day"}}</button> ·
 				<button class="link" name="move" value="week-b">{{.T "nav-dash/week|week"}}</button> ·
-				<button class="link" name="move" value="month-b">{{.T "nav-dash/month|month"}}</button>
+				<button class="link" name="move" value="month-b">{{.T "nav-dash/month|month"}}</button> ·
+				<button class="link" name="move" value="year-b">{{.T "nav-dash/year|year"}}</button>
 			</span>
 		</div>
 		<div id="dash-timerange">{{.Period}}</div>
@@ -138,7 +156,8 @@
 			<span>
 				<button class="link" name="move" value="day-f">{{.T "nav-dash/day|day"}}</button> ·
 				<button class="link" name="move" value="week-f">{{.T "nav-dash/week|week"}}</button> ·
-				<button class="link" name="move" value="month-f">{{.T "nav-dash/month|month"}}</button>
+				<button class="link" name="move" value="month-f">{{.T "nav-dash/month|month"}}</button> ·
+				<button class="link" name="move" value="year-f">{{.T "nav-dash/year|year"}}</button>
 			</span>
 			{{.T "nav-dash/forward|forward"}} →&#xfe0e; {{/* z18n: as in: "[day] [week] [month] forward →" */}}
 		</div>

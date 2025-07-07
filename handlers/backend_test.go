@@ -75,7 +75,7 @@ func TestBackendTpl(t *testing.T) {
 func TestBackendPagesMore(t *testing.T) {
 	ctx := gctest.DB(t)
 	site := Site(ctx)
-	now := ztime.Now()
+	now := ztime.Now(ctx)
 
 	gctest.StoreHits(ctx, t, false,
 		goatcounter.Hit{FirstVisit: true, Path: "/1"},
@@ -245,5 +245,5 @@ func BenchmarkCount(b *testing.B) {
 }
 
 func newBackend(db zdb.DB) chi.Router {
-	return NewBackend(db, nil, true, true, false, "example.com", "", 10, 0, NewRatelimits())
+	return NewBackend(db, nil, true, true, "example.com", "", 10, 0, NewRatelimits())
 }

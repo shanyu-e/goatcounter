@@ -15,7 +15,7 @@ import (
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/db/migrate/gomig"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/jfmt"
 	"zgo.at/json"
 	"zgo.at/slog_align"
@@ -36,6 +36,14 @@ func init() {
 type command func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error
 
 func main() {
+	// Linux doesn't allow some environment variables to be set if any
+	// capability bits (such as cap_net_bind_service) are set, so also read from
+	// GOATCOUNTER_TMPDIR
+	if v, ok := os.LookupEnv("GOATCOUNTER_TMPDIR"); ok {
+		os.Setenv("TMPDIR", v)
+		os.Unsetenv("GOATCOUNTER_TMPDIR")
+	}
+
 	var (
 		f     = zli.NewFlags(os.Args)
 		ready = make(chan struct{}, 1)
@@ -108,9 +116,13 @@ func cmdMain(f zli.Flags, ready chan<- struct{}, stop chan struct{}) {
 	case "db", "database":
 		run = cmdDB
 	case "serve":
-		run = cmdServe
+		run = func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
+			return cmdServe(f, ready, stop, false)
+		}
 	case "saas":
-		run = cmdSaas
+		run = func(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
+			return cmdServe(f, ready, stop, true)
+		}
 	case "monitor":
 		run = cmdMonitor
 	case "import":
@@ -186,8 +198,8 @@ func cmdMain(f zli.Flags, ready chan<- struct{}, stop chan struct{}) {
 func connectDB(connect, dbConn string, migrate []string, create, dev bool) (zdb.DB, context.Context, error) {
 	if strings.Contains(connect, "://") && !strings.Contains(connect, "+") {
 		connect = strings.Replace(connect, "://", "+", 1)
-		log.Errorf(context.Background(),
-			`WARNING: the connection string for -db changed from "engine://connectString" to "engine+connectString"; the ://-variant will work for now, but will be removed in a future release`)
+		log.Warnf(context.Background(), `the connection string for -db changed from "engine://connectString"`+
+			` to "engine+connectString"; the ://-variant will work for now, but will be removed in a future release`)
 	}
 
 	var open, idle int
@@ -226,7 +238,7 @@ func connectDB(connect, dbConn string, migrate []string, create, dev bool) (zdb.
 	})
 	var pErr *zdb.PendingMigrationsError
 	if errors.As(err, &pErr) {
-		log.Errorf(context.Background(), "%s; continuing but things may be broken", err)
+		log.Warnf(context.Background(), "%s; continuing but things may be broken", err)
 		err = nil
 	}
 
@@ -267,7 +279,7 @@ func connectDB(connect, dbConn string, migrate []string, create, dev bool) (zdb.
 	} else {
 		ins()
 	}
-	return db, goatcounter.NewContext(db), nil
+	return db, goatcounter.NewContext(context.Background(), db), nil
 }
 
 func setupLog(dev, asJSON bool, debug []string) {

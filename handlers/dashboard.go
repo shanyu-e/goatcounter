@@ -12,25 +12,22 @@ import (
 
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
-	"zgo.at/goatcounter/v2/metrics"
+	"zgo.at/goatcounter/v2/pkg/log"
+	"zgo.at/goatcounter/v2/pkg/metrics"
 	"zgo.at/goatcounter/v2/widgets"
 	"zgo.at/guru"
 	"zgo.at/z18n"
 	"zgo.at/zhttp"
 	"zgo.at/zstd/zint"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/zsync"
 	"zgo.at/zstd/ztime"
 	"zgo.at/ztpl"
 	"zgo.at/zvalidate"
 )
 
-// DailyView forces the "view by day" if the number of selected days is larger than this.
-const DailyView = 90
-
 func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("dashboard")
-	m.AddTag(r.Host)
+	m := metrics.Start(r.Host)
 	defer m.Done()
 
 	site := Site(r.Context())
@@ -50,7 +47,7 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 
 	rng, err := getPeriod(w, r, site, user)
 	if err != nil {
-		zhttp.FlashError(w, err.Error())
+		zhttp.FlashError(w, r, err.Error())
 	}
 	if rng.Start.IsZero() || rng.End.IsZero() {
 		rng = timeRange(r.Context(), view.Period, user.Settings.Timezone.Loc(), bool(user.Settings.SundayStartsWeek))
@@ -60,23 +57,22 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 	} else {
 		view.Period = q.Get("hl-period")
 	}
+	// Record how often people use the "Current [..]" buttons
+	if strings.HasSuffix(view.Period, "-cur") {
+		metrics.Start(view.Period).Done()
+	}
 
-	showRefs, _ := strconv.ParseInt(q.Get("showrefs"), 10, 64)
+	showRefs, _ := zstrconv.ParseInt[goatcounter.PathID](q.Get("showrefs"), 10)
 	if _, ok := q["filter"]; ok {
 		view.Filter = q.Get("filter")
 	}
-	if _, ok := q["daily"]; ok {
-		view.Daily = q.Get("daily") == "on" || q.Get("daily") == "true"
-	}
-	_, forcedDaily := getDaily(r, rng)
-	if forcedDaily {
-		view.Daily = true
-	}
+	var forcedGroup bool
+	view.Group, forcedGroup = getGroup(r, rng)
 
 	// Get path IDs to filter first, as they're used by the widgets.
 	var (
 		pathFilter = make(chan (struct {
-			Paths []int64
+			Paths []goatcounter.PathID
 			Err   error
 		}))
 	)
@@ -84,15 +80,15 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 		defer log.Recover(r.Context(), func(err error) { log.Error(r.Context(), err, "filter", view.Filter, log.AttrHTTP(r)) })
 
 		var (
-			f     []int64
-			start = ztime.Now()
+			f     []goatcounter.PathID
+			start = ztime.Now(r.Context())
 			err   error
 		)
 		if view.Filter != "" {
 			f, err = goatcounter.PathFilter(r.Context(), view.Filter, true)
 		}
 		pathFilter <- struct {
-			Paths []int64
+			Paths []goatcounter.PathID
 			Err   error
 		}{f, err}
 		log.Module("dashboard").Debug(r.Context(), "pathfilter",
@@ -111,8 +107,8 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 
 	args := widgets.Args{
 		Rng:         rng,
-		Daily:       view.Daily,
-		ForcedDaily: forcedDaily,
+		Group:       view.Group,
+		ForcedGroup: forcedGroup,
 		ShowRefs:    showRefs,
 	}
 
@@ -132,15 +128,11 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 
 	initial := wid
 	var lazy widgets.List
-	if h.websocket {
+	if useWebsocket(r) {
 		initial, lazy = wid.InitialAndLazy()
 	}
 
 	getData := func(w widgets.Widget, start time.Time) {
-		m := metrics.Start("dashboard:" + w.Name())
-		m.AddTag(r.Host)
-		defer m.Done()
-
 		// Create context for every goroutine, so we know which timed out.
 		ctx, cancel := context.WithTimeout(goatcounter.CopyContextValues(r.Context()),
 			time.Duration(h.dashTimeout)*time.Second)
@@ -177,7 +169,7 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 			go func(w widgets.Widget) {
 				defer wg.Done()
 				defer log.Recover(r.Context(), func(err error) { log.Error(r.Context(), err, "data widget", w, log.AttrHTTP(r)) })
-				getData(w, ztime.Now())
+				getData(w, ztime.Now(r.Context()))
 			}(w)
 		}
 		zsync.Wait(r.Context(), &wg)
@@ -221,7 +213,7 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 		for _, w := range lazy {
 			func(w widgets.Widget) {
 				run.Run(func() {
-					getData(w, ztime.Now())
+					getData(w, ztime.Now(r.Context()))
 					getHTML(w)
 					loader.sendJSON(r, connectID, map[string]any{
 						"id":   w.ID(),
@@ -265,17 +257,17 @@ func (h backend) dashboard(w http.ResponseWriter, r *http.Request) error {
 		Globals
 		CountDomain string
 		SubSites    []string
-		ShowRefs    int64
+		ShowRefs    goatcounter.PathID
 		Period      ztime.Range
-		PathFilter  []int64
-		ForcedDaily bool
+		PathFilter  []goatcounter.PathID
+		ForcedGroup bool
 		Widgets     widgets.List
 		View        goatcounter.View
 		Total       int
 		TotalUTC    int
 		ConnectID   zint.Uint128
 	}{newGlobals(w, r), cd, subs, showRefs, rng,
-		args.PathFilter, forcedDaily, wid, view, shared.Total, shared.TotalUTC,
+		args.PathFilter, forcedGroup, wid, view, shared.Total, shared.TotalUTC,
 		connectID})
 }
 
@@ -324,18 +316,18 @@ func (h backend) loadWidget(w http.ResponseWriter, r *http.Request) error {
 		p := wid.(*widgets.Pages)
 
 		args.RowsOnly = true
-		args.Args.Daily, args.Args.ForcedDaily = getDaily(r, rng)
+		args.Args.Group, args.Args.ForcedGroup = getGroup(r, rng)
 
 		if key != "" {
-			p.RefsForPath, _ = strconv.ParseInt(key, 10, 64)
+			p.RefsForPath, _ = zstrconv.ParseInt[goatcounter.PathID](key, 10)
 		} else {
 			p.Max, err = strconv.Atoi(r.URL.Query().Get("max"))
 			if err != nil {
-				return err
+				return guru.Errorf(400, `"max" query parameter wrong: %w`, err)
 			}
-			p.Exclude, err = zint.Split(r.URL.Query().Get("exclude"), ",")
+			p.Exclude, err = zint.Split[goatcounter.PathID](r.URL.Query().Get("exclude"), ",")
 			if err != nil {
-				return err
+				return guru.Errorf(400, `"exclude" query parameter wrong: %w`, err)
 			}
 		}
 	}
@@ -370,19 +362,21 @@ func (h backend) loadWidget(w http.ResponseWriter, r *http.Request) error {
 //	   The start date is set to exactly this period ago. The end date is set to
 //	   the end of the current day.
 //
-//	week-cur, month-cur
+//	week-cur, month-cur, year-cur
 //	   The current week or month; both the start and return are modified.
 //
 //	Any digit
 //	   Last n days.
 func timeRange(ctx context.Context, r string, tz *time.Location, sundayStartsWeek bool) ztime.Range {
-	rng := ztime.NewRange(ztime.Now().In(tz)).Current(ztime.Day)
+	rng := ztime.NewRange(ztime.Now(ctx).In(tz)).Current(ztime.Day)
 	switch r {
 	case "0", "day":
 	case "week-cur":
 		rng = rng.Current(ztime.Week(sundayStartsWeek))
 	case "month-cur":
 		rng = rng.Current(ztime.Month)
+	case "year-cur":
+		rng = rng.Current(ztime.Year)
 	case "week":
 		rng = rng.Last(ztime.Week(sundayStartsWeek))
 	case "month":
@@ -435,15 +429,22 @@ func getPeriod(w http.ResponseWriter, r *http.Request, site *goatcounter.Site, u
 	return rng.From(rng.Start).To(rng.End).UTC(), nil
 }
 
-func getDaily(r *http.Request, rng ztime.Range) (daily bool, forced bool) {
-	if rng.End.Sub(rng.Start).Hours()/24 >= DailyView {
-		return true, true
+func getGroup(r *http.Request, rng ztime.Range) (g goatcounter.Group, forced bool) {
+	// Force daily view for large timespans and force hourly for very short
+	// ones, as it looks horrible otherwise.
+	if d := rng.End.Sub(rng.Start).Hours() / 24; d >= 90 {
+		return goatcounter.GroupDaily, true
+	} else if d <= 6 {
+		return goatcounter.GroupHourly, true
 	}
-	d := strings.ToLower(r.URL.Query().Get("daily"))
-	return d == "on" || d == "true", false
+	switch strings.ToLower(r.URL.Query().Get("group")) {
+	case "day":
+		return goatcounter.GroupDaily, false
+	}
+	return goatcounter.GroupHourly, false
 }
 
-func getPathFilter(v *zvalidate.Validator, r *http.Request) []int64 {
+func getPathFilter(v *zvalidate.Validator, r *http.Request) []goatcounter.PathID {
 	f := r.URL.Query().Get("filter")
 	if f == "" {
 		return nil

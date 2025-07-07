@@ -35,7 +35,7 @@ func (h vcounter) mount(r chi.Router) {
 	c := r.With(middleware.Compress(2), func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "public")
-			w.Header().Set("Expires", ztime.Now().Add(30*time.Minute).Format(time.RFC1123Z))
+			w.Header().Set("Expires", ztime.Now(r.Context()).Add(30*time.Minute).Format(time.RFC1123Z))
 			next.ServeHTTP(w, r)
 		})
 	})
@@ -104,31 +104,35 @@ func (h vcounter) counter(w http.ResponseWriter, r *http.Request) error {
 		noBranding = r.URL.Query().Get("no_branding") != ""
 		style      = r.URL.Query().Get("style")
 	)
-
 	// Sanitize slashes, but only if we can't find the path (so events work).
-	var p goatcounter.Path
-	err := p.ByPath(r.Context(), path)
-	if err != nil {
-		if !zdb.ErrNoRows(err) {
-			return err
+	if !total {
+		var p goatcounter.Path
+		err := p.ByPath(r.Context(), path)
+		if err != nil {
+			if !zdb.ErrNoRows(err) {
+				return err
+			}
+			path = "/" + strings.Trim(path, "/")
 		}
-		path = "/" + strings.Trim(path, "/")
 	}
 
 	if ext == "json" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	}
 
-	var rng ztime.Range
-	startArg := r.URL.Query().Get("start")
+	var (
+		rng      ztime.Range
+		err      error
+		startArg = r.URL.Query().Get("start")
+	)
 	if startArg != "" {
 		switch startArg {
 		case "week":
-			rng.Start = ztime.Now().Add(-7 * 24 * time.Hour)
+			rng.Start = ztime.Now(r.Context()).Add(-7 * 24 * time.Hour)
 		case "month":
-			rng.Start = ztime.Now().Add(-30 * 24 * time.Hour)
+			rng.Start = ztime.Now(r.Context()).Add(-30 * 24 * time.Hour)
 		case "year":
-			rng.Start = ztime.Now().Add(-365 * 24 * time.Hour)
+			rng.Start = ztime.Now(r.Context()).Add(-365 * 24 * time.Hour)
 		default:
 			rng.Start, err = time.Parse("2006-01-02", startArg)
 		}

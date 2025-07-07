@@ -10,7 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"golang.org/x/text/language"
 	"zgo.at/errors"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/json"
 	"zgo.at/z18n"
 	"zgo.at/z18n/msgfile"
@@ -177,7 +177,7 @@ func (o *OverrideTranslations) Update(ctx context.Context) error {
 
 func (o *OverrideTranslations) Get(ctx context.Context, insert bool) error {
 	if oo, ok := cacheI18n(ctx).Get(o.Key(ctx)); ok {
-		*o = *oo.(*OverrideTranslations)
+		*o = *oo
 		return nil
 	}
 
@@ -196,6 +196,6 @@ func (o *OverrideTranslations) Get(ctx context.Context, insert bool) error {
 		return errors.Wrap(err, "OverrideTranslations.List")
 	}
 
-	cacheI18n(ctx).SetDefault(o.Key(ctx), o)
+	cacheI18n(ctx).Set(o.Key(ctx), o)
 	return nil
 }

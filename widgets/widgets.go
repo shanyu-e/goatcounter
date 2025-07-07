@@ -5,7 +5,7 @@ import (
 	"html/template"
 
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/zstd/zint"
 	"zgo.at/zstd/ztime"
 )
@@ -31,10 +31,10 @@ type (
 	Args struct {
 		Rng         ztime.Range
 		Offset      int
-		PathFilter  []int64
-		Daily       bool
-		ForcedDaily bool
-		ShowRefs    int64
+		PathFilter  []goatcounter.PathID
+		Group       goatcounter.Group
+		ForcedGroup bool
+		ShowRefs    goatcounter.PathID
 	}
 
 	// SharedData gets passed to every widget.

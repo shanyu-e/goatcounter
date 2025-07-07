@@ -16,13 +16,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/monoculum/formam/v3"
 	"github.com/sethvargo/go-limiter"
-	"zgo.at/bgrun"
 	"zgo.at/blackmail"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/acme"
 	"zgo.at/goatcounter/v2/cron"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
+	"zgo.at/goatcounter/v2/pkg/geo"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/guru"
 	"zgo.at/zdb"
 	"zgo.at/zhttp"
@@ -89,8 +90,10 @@ func (h settings) mount(r chi.Router, ratelimits Ratelimits) {
 		admin := r.With(requireAccess(goatcounter.AccessAdmin))
 
 		admin.Get("/user/api", zhttp.Wrap(func(w http.ResponseWriter, r *http.Request) error {
-			return h.userAPI(nil)(w, r)
+			return h.userAPI(nil, goatcounter.APIToken{})(w, r)
 		}))
+		admin.Post("/user/api-token", zhttp.Wrap(h.newAPIToken))
+		admin.Post("/user/api-token/remove/{id}", zhttp.Wrap(h.deleteAPIToken))
 
 		admin.Get("/settings/sites", zhttp.Wrap(func(w http.ResponseWriter, r *http.Request) error {
 			return h.sites(nil)(w, r)
@@ -103,7 +106,6 @@ func (h settings) mount(r chi.Router, ratelimits Ratelimits) {
 		admin.Get("/settings/users", zhttp.Wrap(func(w http.ResponseWriter, r *http.Request) error {
 			return h.users(nil)(w, r)
 		}))
-
 		admin.Get("/settings/users/add", zhttp.Wrap(func(w http.ResponseWriter, r *http.Request) error {
 			return h.usersForm(nil, nil)(w, r)
 		}))
@@ -130,10 +132,19 @@ func (h settings) mount(r chi.Router, ratelimits Ratelimits) {
 
 func (h settings) main(verr *zvalidate.Validator) zhttp.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
+		cities := false
+		geodb := geo.Get(r.Context())
+		if geodb == nil {
+			log.Error(r.Context(), "geodb is nil")
+		} else {
+			cities = strings.Contains(strings.ToLower(geodb.Metadata().DatabaseType), "city")
+		}
+
 		return zhttp.Template(w, "settings_main.gohtml", struct {
 			Globals
 			Validate *zvalidate.Validator
-		}{newGlobals(w, r), verr})
+			Cities   bool
+		}{newGlobals(w, r), verr, cities})
 	}
 }
 
@@ -206,7 +217,7 @@ func (h settings) mainSave(w http.ResponseWriter, r *http.Request) error {
 		})
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/saved|Saved!"))
+	zhttp.Flash(w, r, T(r.Context(), "notify/saved|Saved!"))
 	return zhttp.SeeOther(w, "/settings")
 }
 
@@ -231,7 +242,7 @@ func (h settings) changeCode(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/saved|Saved!"))
+	zhttp.Flash(w, r, T(r.Context(), "notify/saved|Saved!"))
 	return zhttp.SeeOther(w, site.URL(r.Context())+"/settings/main")
 }
 
@@ -296,7 +307,7 @@ func (h settings) sitesAdd(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 
-		zhttp.Flash(w, T(r.Context(),
+		zhttp.Flash(w, r, T(r.Context(),
 			"notify/restored-previously-deleted-site|Site ‘%(url)’ was previously deleted; restored site with all data.",
 			newSite.URL(r.Context())))
 		return zhttp.SeeOther(w, "/settings/sites")
@@ -316,15 +327,15 @@ func (h settings) sitesAdd(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	})
 	if err != nil {
-		zhttp.FlashError(w, err.Error())
+		zhttp.FlashError(w, r, err.Error())
 		return zhttp.SeeOther(w, "/settings/sites")
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/site-added|Site ‘%(url)’ added.", newSite.URL(r.Context())))
+	zhttp.Flash(w, r, T(r.Context(), "notify/site-added|Site ‘%(url)’ added.", newSite.URL(r.Context())))
 	return zhttp.SeeOther(w, "/settings/sites")
 }
 
-func (h settings) getSite(ctx context.Context, id int64) (*goatcounter.Site, error) {
+func (h settings) getSite(ctx context.Context, id goatcounter.SiteID) (*goatcounter.Site, error) {
 	var s goatcounter.Site
 	err := s.ByID(ctx, id)
 	if err != nil {
@@ -337,7 +348,7 @@ func (h settings) getSite(ctx context.Context, id int64) (*goatcounter.Site, err
 		return nil, err
 	}
 
-	if !slices.Contains(account.IDs(), s.ID) {
+	if !slices.Contains(account.IDs(), int32(s.ID)) {
 		return nil, guru.New(404, T(ctx, "error/not-found|Not Found"))
 	}
 
@@ -346,7 +357,7 @@ func (h settings) getSite(ctx context.Context, id int64) (*goatcounter.Site, err
 
 func (h settings) sitesRemoveConfirm(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.SiteID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -364,7 +375,7 @@ func (h settings) sitesRemoveConfirm(w http.ResponseWriter, r *http.Request) err
 
 func (h settings) sitesRemove(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.SiteID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -380,7 +391,7 @@ func (h settings) sitesRemove(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/site-removed|Site ‘%(url)’ removed.", s.URL(r.Context())))
+	zhttp.Flash(w, r, T(r.Context(), "notify/site-removed|Site ‘%(url)’ removed.", s.URL(r.Context())))
 
 	// Redirect to parent if we're removing the current site.
 	if sID == Site(r.Context()).ID && s.Parent != nil {
@@ -399,8 +410,8 @@ func (h settings) sitesCopySettings(w http.ResponseWriter, r *http.Request) erro
 	master := Site(r.Context())
 
 	var args struct {
-		Sites    []int64 `json:"sites"`
-		AllSites bool    `json:"allsites"`
+		Sites    []goatcounter.SiteID `json:"sites"`
+		AllSites bool                 `json:"allsites"`
 	}
 	_, err := zhttp.Decode(r, &args)
 	if err != nil {
@@ -435,7 +446,7 @@ func (h settings) sitesCopySettings(w http.ResponseWriter, r *http.Request) erro
 		}
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/settings-copied-to-site|Settings copied to the selected sites."))
+	zhttp.Flash(w, r, T(r.Context(), "notify/settings-copied-to-site|Settings copied to the selected sites."))
 	return zhttp.SeeOther(w, "/settings/sites")
 }
 
@@ -471,7 +482,7 @@ func (h settings) purge(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h settings) purgeDo(w http.ResponseWriter, r *http.Request) error {
-	paths, err := zint.Split(r.Form.Get("paths"), ",")
+	paths, err := zint.Split[goatcounter.PathID](r.Form.Get("paths"), ",")
 	if err != nil {
 		return err
 	}
@@ -485,14 +496,14 @@ func (h settings) purgeDo(w http.ResponseWriter, r *http.Request) error {
 		}
 	})
 
-	zhttp.Flash(w, T(r.Context(),
+	zhttp.Flash(w, r, T(r.Context(),
 		"notify/started-background-process|Started in the background; may take about 10-20 seconds to fully process."))
 	return zhttp.SeeOther(w, "/settings/purge")
 }
 
 func (h settings) merge(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	pathID := v.Integer("merge_with", r.Form.Get("merge_with"))
+	pathID := goatcounter.PathID(v.Integer32("merge_with", r.Form.Get("merge_with")))
 	if v.HasErrors() {
 		return v
 	}
@@ -502,11 +513,11 @@ func (h settings) merge(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	mergeIDs, err := zint.Split(r.Form.Get("paths"), ",")
+	mergeIDs, err := zint.Split[goatcounter.PathID](r.Form.Get("paths"), ",")
 	if err != nil {
 		return err
 	}
-	mergeIDs = slices.DeleteFunc(mergeIDs, func(p int64) bool { return p == pathID })
+	mergeIDs = slices.DeleteFunc(mergeIDs, func(p goatcounter.PathID) bool { return p == pathID })
 	merge := make(goatcounter.Paths, len(mergeIDs))
 	for i := range mergeIDs {
 		err := merge[i].ByID(r.Context(), mergeIDs[i])
@@ -523,7 +534,7 @@ func (h settings) merge(w http.ResponseWriter, r *http.Request) error {
 		}
 	})
 
-	zhttp.Flash(w, T(r.Context(), `notify/started-background-process|
+	zhttp.Flash(w, r, T(r.Context(), `notify/started-background-process|
 		Started in the background; may take about 10-20 seconds to fully process.`))
 	return zhttp.SeeOther(w, "/settings/purge")
 }
@@ -548,7 +559,7 @@ func (h settings) export(verr *zvalidate.Validator) zhttp.HandlerFunc {
 
 func (h settings) exportDownload(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.ExportID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -562,7 +573,7 @@ func (h settings) exportDownload(w http.ResponseWriter, r *http.Request) error {
 	fp, err := os.Open(export.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			zhttp.FlashError(w, T(r.Context(), "error/export-expired|It looks like there is no export yet or the export has expired."))
+			zhttp.FlashError(w, r, T(r.Context(), "error/export-expired|It looks like there is no export yet or the export has expired."))
 			return zhttp.SeeOther(w, "/settings/export")
 		}
 
@@ -648,7 +659,7 @@ func (h settings) exportImport(w http.ResponseWriter, r *http.Request) error {
 		}
 	})
 
-	zhttp.Flash(w, T(r.Context(),
+	zhttp.Flash(w, r, T(r.Context(),
 		"notify/import-started-in-background|Import started in the background; you’ll get an email when it’s done."))
 	return zhttp.SeeOther(w, "/settings/export")
 }
@@ -674,7 +685,7 @@ func (h settings) exportImportGA(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/import-ga-okay|Data processed successfully."))
+	zhttp.Flash(w, r, T(r.Context(), "notify/import-ga-okay|Data processed successfully."))
 	return zhttp.SeeOther(w, "/settings/export")
 }
 
@@ -682,7 +693,7 @@ func (h settings) exportStart(w http.ResponseWriter, r *http.Request) error {
 	r.ParseForm()
 
 	v := goatcounter.NewValidate(r.Context())
-	startFrom := v.Integer("startFrom", r.Form.Get("startFrom"))
+	startFrom := goatcounter.HitID(v.Integer("startFrom", r.Form.Get("startFrom")))
 	if v.HasErrors() {
 		return v
 	}
@@ -697,7 +708,7 @@ func (h settings) exportStart(w http.ResponseWriter, r *http.Request) error {
 	bgrun.RunFunction(fmt.Sprintf("export web:%d", Site(ctx).ID),
 		func() { export.Run(ctx, fp, true) })
 
-	zhttp.Flash(w, T(r.Context(), "notify/export-started-in-background|Export started in the background; you’ll get an email with a download link when it’s done."))
+	zhttp.Flash(w, r, T(r.Context(), "notify/export-started-in-background|Export started in the background; you’ll get an email with a download link when it’s done."))
 	return zhttp.SeeOther(w, "/settings/export")
 }
 
@@ -730,7 +741,7 @@ func (h settings) mergeAccount(verr *zvalidate.Validator) zhttp.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		user := User(r.Context())
 
-		sites := make(map[int64]goatcounter.Sites)
+		sites := make(map[goatcounter.SiteID]goatcounter.Sites)
 		if user.EmailVerified {
 			var users goatcounter.Users
 			err := users.ByEmail(r.Context(), user.Email)
@@ -759,7 +770,7 @@ func (h settings) mergeAccount(verr *zvalidate.Validator) zhttp.HandlerFunc {
 
 		return zhttp.Template(w, "settings_merge.gohtml", struct {
 			Globals
-			Sites    map[int64]goatcounter.Sites
+			Sites    map[goatcounter.SiteID]goatcounter.Sites
 			Validate *zvalidate.Validator
 		}{newGlobals(w, r), sites, verr})
 	}
@@ -767,7 +778,7 @@ func (h settings) mergeAccount(verr *zvalidate.Validator) zhttp.HandlerFunc {
 
 func (h settings) mergeAccountDo(w http.ResponseWriter, r *http.Request) error {
 	var args struct {
-		MergeID int64 `json:"mergeID"`
+		MergeID goatcounter.SiteID `json:"mergeID"`
 	}
 	if _, err := zhttp.Decode(r, &args); err != nil {
 		return err
@@ -800,7 +811,7 @@ func (h settings) mergeAccountDo(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	mergeSiteIDs := make([]int64, 0, len(mergeSites))
+	mergeSiteIDs := make([]goatcounter.SiteID, 0, len(mergeSites))
 	for _, m := range mergeSites {
 		mergeSiteIDs = append(mergeSiteIDs, m.ID)
 	}
@@ -817,14 +828,23 @@ func (h settings) mergeAccountDo(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		return zdb.Exec(ctx, `delete from users where site_id in (?) and  lower(email) = lower(?)`,
+		return zdb.Exec(ctx, `delete from users where site_id in (?) and lower(email) = lower(?)`,
 			mergeSiteIDs, user.Email)
 	})
 	if err != nil {
 		return err
 	}
 
-	zhttp.Flash(w, "okay")
+	Account(r.Context()).ClearCache(r.Context(), false)
+	for _, s := range mergeSites {
+		s.ClearCache(r.Context(), false)
+	}
+	log.Info(r.Context(), "merged site",
+		"account", Account(r.Context()).ID,
+		"merge_ids", mergeSiteIDs,
+		"email", mergeUser.Email)
+
+	zhttp.Flash(w, r, "okay")
 	return zhttp.SeeOther(w, "/settings/merge-account")
 }
 
@@ -855,7 +875,7 @@ func (h settings) usersForm(newUser *goatcounter.User, pErr error) zhttp.Handler
 			}
 
 			v := goatcounter.NewValidate(r.Context())
-			id := v.Integer("id", chi.URLParam(r, "id"))
+			id := goatcounter.UserID(v.Integer32("id", chi.URLParam(r, "id")))
 			if v.HasErrors() {
 				return v
 			}
@@ -873,7 +893,6 @@ func (h settings) usersForm(newUser *goatcounter.User, pErr error) zhttp.Handler
 			pErr = nil
 		}
 		if pErr != nil {
-			log.Error(r.Context(), pErr)
 			var code int
 			code, pErr = zhttp.UserError(pErr)
 			w.WriteHeader(code)
@@ -940,13 +959,13 @@ func (h settings) usersAdd(w http.ResponseWriter, r *http.Request) error {
 		}
 	})
 
-	zhttp.Flash(w, T(r.Context(), "notify/user-added|User ‘%(email)’ added.", newUser.Email))
+	zhttp.Flash(w, r, T(r.Context(), "notify/user-added|User ‘%(email)’ added.", newUser.Email))
 	return zhttp.SeeOther(w, "/settings/users")
 }
 
 func (h settings) usersEdit(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.UserID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -998,13 +1017,13 @@ func (h settings) usersEdit(w http.ResponseWriter, r *http.Request) error {
 		return h.usersForm(&editUser, err)(w, r)
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/users-edited|User ‘%(email)’ edited.", editUser.Email))
+	zhttp.Flash(w, r, T(r.Context(), "notify/users-edited|User ‘%(email)’ edited.", editUser.Email))
 	return zhttp.SeeOther(w, "/settings/users")
 }
 
 func (h settings) usersRemove(w http.ResponseWriter, r *http.Request) error {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.UserID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -1026,7 +1045,7 @@ func (h settings) usersRemove(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/user-removed|User ‘%(email)’ removed.", user.Email))
+	zhttp.Flash(w, r, T(r.Context(), "notify/user-removed|User ‘%(email)’ removed.", user.Email))
 	return zhttp.SeeOther(w, "/settings/users")
 }
 
@@ -1043,7 +1062,7 @@ func (h settings) bosmang(w http.ResponseWriter, r *http.Request) error {
 		Race     bool
 		Cgo      bool
 	}{newGlobals(w, r),
-		ztime.Now().Sub(Started).Round(time.Second).String(),
+		ztime.Now(r.Context()).Sub(Started).Round(time.Second).String(),
 		goatcounter.Version,
 		zdb.SQLDialect(r.Context()).String() + " " + string(info.Version),
 		runtime.Version(),

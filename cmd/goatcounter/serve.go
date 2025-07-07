@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,29 +17,28 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/oschwald/maxminddb-golang"
 	"github.com/teamwork/reload"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"golang.org/x/text/language"
-	"zgo.at/bgrun"
 	"zgo.at/blackmail"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/acme"
 	"zgo.at/goatcounter/v2/cron"
 	"zgo.at/goatcounter/v2/handlers"
-	"zgo.at/goatcounter/v2/log"
-	"zgo.at/slog_align"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
+	"zgo.at/goatcounter/v2/pkg/email_log"
+	"zgo.at/goatcounter/v2/pkg/geo"
+	"zgo.at/goatcounter/v2/pkg/geo/geoip2"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/z18n"
-	"zgo.at/zdb"
 	"zgo.at/zhttp"
 	"zgo.at/zli"
 	"zgo.at/zstd/zfs"
 	"zgo.at/zstd/zio"
 	"zgo.at/zstd/znet"
 	"zgo.at/zstd/zruntime"
-	"zgo.at/zstd/zstring"
 	"zgo.at/ztpl"
 	"zgo.at/zvalidate"
 )
@@ -65,13 +62,17 @@ Environment:
 
     GOATCOUNTER_LISTEN=:80
     GOATCOUNTER_STORE_EVERY=60
-    GOATCOUNTER_WEBSOCKET=
+    GOATCOUNTER_AUTOMIGRATE=
 
   Additional environment variables:
 
-    TMPDIR       Directory for temporary files; only used to store CSV exports
-                 at the moment. On Windows it will use the first non-empty value
-                 of %TMP%, %TEMP%, and %USERPROFILE%.
+
+    TMPDIR              Directory for temporary files; only used to store CSV
+                        exports at the moment. On Windows it will use the first
+                        non-empty value of %TMP%, %TEMP%, and %USERPROFILE%.
+    GOATCOUNTER_TMPDIR  Alternative way to set TMPDIR; takes precedence over TMPDIR.
+                        Mainly intended for cases where TMPDIR can't be used
+                        (e.g. when the capability bit is set on Linux).
 
 Flags:
 
@@ -139,12 +140,26 @@ Flags:
                version.
 
                GoatCounter will automatically use the first .mmdb file in
-               ./goatcounter-data, if any exists.
+               ./goatcounter-data, if any exists. GoatCounter comes with a
+               Countries version built-in, and will use that if this flag isn't
+               given and there is no file in ./goatcounter-data. You only need
+               this if you want to use a newer/different version, or if you want
+               to record regions.
 
-               GoatCounter comes with a Countries version built-in, and will use
-               that if this flag isn't given and there is no file in
-               ./goatcounter-data. You only need this if you want to use a
-               newer/different version, or if you want to record regions.
+               This can also be a MaxMind account ID and license key, in which
+               case GoatCounter will automatically download a Cities database
+               from MaxMind and update it every week. The format for this is:
+
+                   maxmind:account_id:license[:path]
+
+               :path may be omitted and defaults to goatcounter-data/auto.mmdb.
+
+               For example:
+
+                   -geodb 123456:abcdef
+                   -geodb 123456:abcdef:/home/goatcounter/cities.mmd
+
+               Updates are only done on restarts.
 
   -ratelimit   Set rate limits for various actions; the syntax is
                "name:num-requests/seconds"; multiple values are separated by
@@ -164,13 +179,6 @@ Flags:
                the defaults (200 for paths, 100 for everything else), or <0 for
                no limit.
 
-  -websocket   Use a websocket to send data. The advantage of this is that the
-               perceived performance is quite a bit better, especially with a
-               lot of data, since things can be loaded "lazily". The downside is
-               that it doesn't work out-of-the-box with a proxy setup (e.g.
-               nginx, Apache, Varnish, etc.) and requires special configuration,
-               which is why it's disabled by default.
-
   -store-every How often to persist pageviews to the database, in seconds.
                Higher values will give better performance, but it will take a
                bit longer for pageviews to show. The default is 10 seconds.
@@ -183,113 +191,142 @@ Flags:
                See "goatcounter help debug" for a list of modules.
 `
 
-func cmdServe(f zli.Flags, ready chan<- struct{}, stop chan struct{}) error {
-	v := zvalidate.New()
-
+func cmdServe(f zli.Flags, ready chan<- struct{}, stop chan struct{}, saas bool) error {
 	var (
-		// TODO(depr): -port is for compat with <2.0
-		port         = f.Int(0, "public-port", "port").Pointer()
-		basePath     = f.String("/", "base-path").Pointer()
-		domainStatic = f.String("", "static").Pointer()
+		port         = f.Int(0, "public-port", "port") // TODO(depr): -port is for compat with <2.0
+		basePath     = f.String("", "base-path")
+		domainStatic = f.String("", "static")
+		dbConnect    = f.String(defaultDB(), "db")
+		dbConn       = f.String("16,4", "dbconn")
+		debugFlag    = f.StringList(nil, "debug")
+		dev          = f.Bool(false, "dev")
+		automigrate  = f.Bool(false, "automigrate")
+		listen       = f.String(":8080", "listen")
+		smtp         = f.String(blackmail.ConnectWriter, "smtp")
+		flagTLS      = f.String("http", "tls")
+		errorsFlag   = f.String("", "errors")
+		from         = f.String("", "email-from")
+		geodbFlag    = f.String("", "geodb")
+		ratelimit    = f.String("", "ratelimit")
+		apiMax       = f.Int(0, "api-max")
+		storeEvery   = f.Int(10, "store-every")
+		json         = f.Bool(false, "json")
+		_            = f.Bool(false, "websocket") // TODO(depr): no-op for compat with <2.7
+
+		// For saas
+		domain = f.String("goatcounter.localhost:8081,static.goatcounter.localhost:8081", "domain")
 	)
-	dbConnect, dbConn, dev, automigrate, listen, flagTLS, from, websocket, apiMax, ratelimits, geomd, err := flagsServe(f, &v)
-	if err != nil {
+	if err := f.Parse(zli.FromEnv("GOATCOUNTER")); err != nil {
 		return err
 	}
 
-	return func(port int, basePath, domainStatic string) error {
-		basePath = strings.Trim(basePath, "/")
-		if basePath != "" {
-			basePath = "/" + basePath
-		}
-		zhttp.BasePath = basePath
+	v := zvalidate.New()
 
-		var domainCount, urlStatic string
-		if domainStatic != "" {
-			if p := strings.Index(domainStatic, ":"); p > -1 {
-				v.Domain("-static", domainStatic[:p])
-			} else {
-				v.Domain("-static", domainStatic)
-			}
-			urlStatic = "//" + domainStatic
-			domainCount = domainStatic
-		} else {
-			urlStatic = basePath
-		}
+	setupLog(dev.Bool(), json.Bool(), debugFlag.StringsSplit(","))
 
-		//from := flagFrom(from, "cfg.Domain", &v)
-		from := flagFrom(from, "", &v)
-		if v.HasErrors() {
-			return v
+	if dev.Bool() {
+		zhttp.DefaultDecoder = zhttp.NewDecoder(true, false) // Log unknown fields
+		if err := setupReload(); err != nil {
+			return err
 		}
+	}
+	if flagTLS.String() == "" {
+		*flagTLS.Pointer() = map[bool]string{true: "http", false: "acme"}[dev.Bool()]
+	}
 
-		db, ctx, tlsc, acmeh, listenTLS, err := setupServe(dbConnect, dbConn, dev, flagTLS, automigrate)
+	flagErrors(&v, errorsFlag.String())
+	flagEmail(&v, smtp.String())
+	geodb := setupGeo(&v, geodbFlag.String())
+	ratelimits := setupRatelimits(&v, ratelimit.String())
+	*from.Pointer() = flagFrom(&v, from.String(), domain.String())
+	domainCount, urlStatic := setupDomains(&v, saas, dev.Bool(), domain.Pointer(), domainStatic.Pointer())
+
+	v.Range("-store-every", int64(storeEvery.Int()), 1, 0)
+	cron.SetPersistInterval(time.Duration(storeEvery.Int()) * time.Second)
+
+	zhttp.BasePath = strings.Trim(basePath.String(), "/")
+	if zhttp.BasePath != "" {
+		zhttp.BasePath = "/" + zhttp.BasePath
+	}
+
+	if v.HasErrors() {
+		return v
+	}
+
+	db, ctx, err := connectDB(dbConnect.String(), dbConn.String(),
+		map[bool][]string{true: {"all"}, false: {"pending"}}[automigrate.Bool()],
+		true, dev.Bool())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx = z18n.With(ctx, z18n.NewBundle(language.English).Locale("en"))
+	ctx = geo.With(ctx, geodb)
+
+	if err := setupTpl(ctx, dev.Bool()); err != nil {
+		return err
+	}
+
+	tlsc, acmeh, listenTLS := acme.Setup(db, flagTLS.String(), dev.Bool())
+
+	zhttp.ErrPage = handlers.ErrPage
+	zhttp.CookieSameSiteHelper = handlers.SameSite
+
+	if err := goatcounter.Memstore.Init(db); err != nil {
+		return err
+	}
+
+	cron.Start(goatcounter.CopyContextValues(ctx))
+
+	c := goatcounter.Config(ctx)
+	c.GoatcounterCom = saas
+	c.Domain = domain.String()
+	c.DomainStatic = domainStatic.String()
+	c.DomainCount = domainCount
+	c.URLStatic = urlStatic
+	c.Dev = dev.Bool()
+	c.BasePath = zhttp.BasePath
+	c.EmailFrom = from.String()
+
+	if port.Int() > 0 {
+		c.Port = fmt.Sprintf(":%d", port.Int())
+	}
+
+	timeout := 60
+	if saas {
+		timeout = 15
+	}
+
+	// Set up HTTP handler and servers.
+	hosts := map[string]http.Handler{
+		"*": handlers.NewBackend(db, acmeh, dev.Bool(), c.GoatcounterCom, c.DomainStatic, c.BasePath, timeout, apiMax.Int(), ratelimits),
+	}
+	if saas {
+		d := znet.RemovePort(domain.String())
+		hosts[d] = zhttp.RedirectHost("https://www." + domain.String())
+		hosts["www."+d] = handlers.NewWebsite(db, dev.Bool())
+		if dev.Bool() {
+			hosts[znet.RemovePort(domainStatic.String())] = handlers.NewStatic(chi.NewRouter(), dev.Bool(), true, c.BasePath)
+		}
+	}
+	if domainStatic.String() != "" {
+		// May not be needed, but just in case the DomainStatic isn't an
+		// external CDN.
+		hosts[znet.RemovePort(domainStatic.String())] = handlers.NewStatic(chi.NewRouter(), dev.Bool(), false, c.BasePath)
+	}
+
+	var cnames []string
+	if !saas {
+		cnames, err = lsSites(ctx)
 		if err != nil {
 			return err
 		}
+	}
 
-		c := goatcounter.Config(ctx)
-		c.EmailFrom = from
-		if port > 0 {
-			c.Port = fmt.Sprintf(":%d", port)
-		}
-		c.DomainStatic = domainStatic
-		c.Dev = dev
-		c.URLStatic = urlStatic
-		c.BasePath = basePath
-		c.DomainCount = domainCount
-		c.Websocket = websocket
-
-		// Set up HTTP handler and servers.
-		hosts := map[string]http.Handler{
-			"*": handlers.NewBackend(db, acmeh, dev, c.GoatcounterCom, websocket, c.DomainStatic, c.BasePath, 60, apiMax, ratelimits),
-		}
-		if domainStatic != "" {
-			// May not be needed, but just in case the DomainStatic isn't an
-			// external CDN.
-			hosts[znet.RemovePort(domainStatic)] = handlers.NewStatic(chi.NewRouter(), dev, false, c.BasePath)
-		}
-
-		cnames, err := lsSites(ctx)
-		if err != nil {
-			return err
-		}
-
-		return doServe(ctx, db, listen, listenTLS, tlsc, hosts, stop, func() {
-			log.Module("startup").Info(ctx, "GoatCounter ready", startupAttr(geomd, listen, dev,
-				"num_sites", len(cnames),
-				"sites", cnames,
-			)...)
-
-			if len(cnames) == 0 {
-				dbFlag := ""
-				if dbConnect != defaultDB() {
-					dbFlag = `-db="` + strings.ReplaceAll(dbConnect, `"`, `\"`) + `" `
-				}
-				// Adjust command for Docker or Podman
-				cmd := "goatcounter"
-				if _, err := os.Stat("/.dockerenv"); err == nil && os.Getenv("HOSTNAME") != "" {
-					cmd = "docker exec -it " + os.Getenv("HOSTNAME") + " goatcounter"
-				}
-				if _, err := os.Stat("/run/.containerenv"); err == nil && os.Getenv("HOSTNAME") != "" {
-					cmd = "podman exec -it " + os.Getenv("HOSTNAME") + " goatcounter"
-				}
-				log.Warnf(ctx, "No sites yet; access the web interface or use the CLI to create one:\n"+
-					"    %s db %screate site -vhost=.. -user.email=..", cmd, dbFlag)
-			}
-			ready <- struct{}{}
-		})
-	}(*port, *basePath, *domainStatic)
-}
-
-func doServe(ctx context.Context, db zdb.DB,
-	listen string, listenTLS uint8, tlsc *tls.Config, hosts map[string]http.Handler,
-	stop chan struct{}, start func(),
-) error {
-
-	var sig = make(chan os.Signal, 1)
 	ch, err := zhttp.Serve(listenTLS, stop, &http.Server{
-		Addr:        listen,
+		Addr: listen.String(),
+		// TODO: h2c no longer needed? https://github.com/golang/go/issues/72039
 		Handler:     h2c.NewHandler(zhttp.HostRoute(hosts), &http2.Server{}),
 		TLSConfig:   tlsc,
 		BaseContext: func(net.Listener) context.Context { return ctx },
@@ -299,9 +336,36 @@ func doServe(ctx context.Context, db zdb.DB,
 	}
 
 	<-ch // Server is set up
-	start()
+
+	extra := []any{"num_sites", len(cnames), "sites", cnames}
+	if saas {
+		extra = []any{"domain", domain}
+	}
+	log.Module("startup").Info(ctx, "GoatCounter ready",
+		startupAttr(geodb, listen.String(), dev.Bool(), extra...)...)
+
+	if !saas && len(cnames) == 0 {
+		dbFlag := ""
+		if dbConnect.String() != defaultDB() {
+			dbFlag = `-db="` + strings.ReplaceAll(dbConnect.String(), `"`, `\"`) + `" `
+		}
+		// Adjust command for Docker or Podman
+		cmd := "goatcounter"
+		if _, err := os.Stat("/.dockerenv"); err == nil && os.Getenv("HOSTNAME") != "" {
+			cmd = "docker exec -it " + os.Getenv("HOSTNAME") + " goatcounter"
+		}
+		if _, err := os.Stat("/run/.containerenv"); err == nil && os.Getenv("HOSTNAME") != "" {
+			cmd = "podman exec -it " + os.Getenv("HOSTNAME") + " goatcounter"
+		}
+		log.Warnf(ctx, "No sites yet; access the web interface or use the CLI to create one:\n"+
+			"    %s db %screate site -vhost=.. -user.email=..", cmd, dbFlag)
+	}
+
+	ready <- struct{}{}
 
 	<-ch // Shutdown
+
+	sig := make(chan os.Signal, 1)
 	go func() {
 		signal.Notify(sig, syscall.SIGHUP, syscall.SIGTERM, os.Interrupt /*SIGINT*/)
 		<-sig
@@ -339,7 +403,6 @@ func doServe(ctx context.Context, db zdb.DB,
 		}
 	}
 	fmt.Fprintln(zli.Stdout)
-	db.Close()
 	return nil
 }
 
@@ -350,175 +413,34 @@ func defaultDB() string {
 	return "sqlite+./goatcounter-data/db.sqlite3"
 }
 
-type geometa struct {
-	path string
-	md   maxminddb.Metadata
-}
-
-func flagsServe(f zli.Flags, v *zvalidate.Validator) (string, string, bool, bool, string, string, string, bool, int, handlers.Ratelimits, geometa, error) {
-	var (
-		dbConnect   = f.String(defaultDB(), "db").Pointer()
-		dbConn      = f.String("16,4", "dbconn").Pointer()
-		debug       = f.StringList(nil, "debug")
-		dev         = f.Bool(false, "dev").Pointer()
-		automigrate = f.Bool(false, "automigrate").Pointer()
-		listen      = f.String(":8080", "listen").Pointer()
-		smtp        = f.String(blackmail.ConnectWriter, "smtp").Pointer()
-		flagTLS     = f.String("http", "tls").Pointer()
-		errors      = f.String("", "errors").Pointer()
-		from        = f.String("", "email-from").Pointer()
-		geodb       = f.String("", "geodb").Pointer()
-		ratelimit   = f.String("", "ratelimit").Pointer()
-		apiMax      = f.Int(0, "api-max").Pointer()
-		storeEvery  = f.Int(10, "store-every").Pointer()
-		websocket   = f.Bool(false, "websocket").Pointer()
-		json        = f.Bool(false, "json").Pointer()
-	)
-	if err := f.Parse(zli.FromEnv("GOATCOUNTER")); err != nil {
-		return "", "", false, false, "", "", "", false, 0, handlers.Ratelimits{}, geometa{}, err
+func setupReload() error {
+	if !zio.Exists("db/migrate") || !zio.Exists("tpl") || !zio.Exists("public") {
+		return errors.New("-dev flag was given but this doesn't seem like a GoatCounter source directory")
 	}
-
-	setupLog(*dev, *json, debug.StringsSplit(","))
-	if *dev {
-		zhttp.DefaultDecoder = zhttp.NewDecoder(true, false)
-	}
-
-	flagErrors(*errors, v)
-
-	if *smtp != blackmail.ConnectDirect && *smtp != blackmail.ConnectWriter {
-		v.URLLocal("-smtp", *smtp)
-	}
-	blackmail.DefaultMailer = blackmail.NewMailer(*smtp)
-
-	v.Range("-store-every", int64(*storeEvery), 1, 0)
-	cron.SetPersistInterval(time.Duration(*storeEvery) * time.Second)
-
-	if *geodb == "" {
-		ls, _ := os.ReadDir("goatcounter-data")
-		for _, f := range ls {
-			if strings.HasSuffix(f.Name(), ".mmdb") {
-				*geodb = "goatcounter-data/" + f.Name()
-				break
-			}
-		}
-	}
-	geomd, err := goatcounter.InitGeoDB(*geodb)
-	if err != nil {
-		return "", "", false, false, "", "", "", false, 0, handlers.Ratelimits{}, geometa{},
-			fmt.Errorf("loading GeoIP database: %w", err)
-	}
-	if *geodb == "" {
-		*geodb = "(builtin)"
-	}
-	md := geometa{*geodb, geomd}
-
-	ratelimits := handlers.NewRatelimits()
-	if *ratelimit != "" {
-		for _, r := range strings.Split(*ratelimit, ",") {
-			name, spec, _ := strings.Cut(r, ":")
-			reqs, secs, _ := strings.Cut(spec, "/")
-
-			v := zvalidate.New()
-			v.Required("name", name)
-			v.Required("requests", reqs)
-			v.Required("seconds", secs)
-			nn := v.Include("name", name, []string{"count", "api", "api-count", "export", "login"})
-			name = nn.(string)
-			r := v.Integer("requests", reqs)
-			s := v.Integer("seconds", secs)
-			if v.HasErrors() {
-				return *dbConnect, *dbConn, *dev, *automigrate, *listen, *flagTLS, *from, *websocket, *apiMax, handlers.Ratelimits{}, geometa{},
-					fmt.Errorf("invalid -ratelimit flag: %q: %w", *ratelimit, v)
-			}
-			ratelimits.Set(name, int(r), s)
-		}
-	}
-
-	return *dbConnect, *dbConn, *dev, *automigrate, *listen, *flagTLS, *from, *websocket, *apiMax, ratelimits, md, nil
-}
-
-func setupServe(dbConnect, dbConn string, dev bool, flagTLS string, automigrate bool) (zdb.DB, context.Context, *tls.Config, http.HandlerFunc, uint8, error) {
-	if dev {
-		setupReload()
-	}
-
-	db, ctx, err := connectDB(dbConnect, dbConn, map[bool][]string{true: {"all"}, false: {"pending"}}[automigrate], true, dev)
-	if err != nil {
-		return nil, nil, nil, nil, 0, err
-	}
-
-	ctx = z18n.With(ctx, z18n.NewBundle(language.English).Locale("en"))
-
-	if dev {
-		if !zio.Exists("db/migrate") || !zio.Exists("tpl") || !zio.Exists("public") {
-			return nil, nil, nil, nil, 0, errors.New("-dev flag was given but this doesn't seem like a GoatCounter source directory")
-		}
-		if _, err := exec.LookPath("git"); err == nil {
-			rev := ""
-			b, ok := debug.ReadBuildInfo()
-			if ok {
-				for _, s := range b.Settings {
-					if s.Key == "vcs.revision" {
-						rev = s.Value
-					}
+	if _, err := exec.LookPath("git"); err == nil {
+		rev := ""
+		b, ok := debug.ReadBuildInfo()
+		if ok {
+			for _, s := range b.Settings {
+				if s.Key == "vcs.revision" {
+					rev = s.Value
 				}
 			}
-			if rev != "" {
-				have, err := exec.Command("git", "log", "-n1", "--pretty=format:%H").CombinedOutput()
-				if err == nil {
-					if h := strings.TrimSpace(string(have)); rev != h {
-						log.Errorf(ctx, "goatcounter was built from revision %s but source directory has revision %s", rev[:7], h[:7])
-					}
+		}
+		if rev != "" {
+			have, err := exec.Command("git", "log", "-n1", "--pretty=format:%H").CombinedOutput()
+			if err == nil {
+				if h := strings.TrimSpace(string(have)); rev != h {
+					log.Errorf(context.Background(),
+						"goatcounter was built from revision %s but source directory has revision %s",
+						rev[:7], h[:7])
 				}
 			}
 		}
 	}
 
-	fsys, err := zfs.EmbedOrDir(goatcounter.Templates, "tpl", dev)
-	if err != nil {
-		return nil, nil, nil, nil, 0, err
-	}
-	err = ztpl.Init(fsys)
-	if err != nil {
-		if !dev {
-			return nil, nil, nil, nil, 0, err
-		}
-		log.Error(ctx, err)
-	}
-
-	tlsc, acmeh, listenTLS, secure := acme.Setup(db, flagTLS, dev)
-
-	zhttp.CookieSecure = secure
-	zhttp.ErrPage = handlers.ErrPage
-
-	// Set SameSite=None to allow embedding GoatCounter in a frame and allowing
-	// login; there is no way to make this work with Lax or Strict as far as I
-	// can find (there is no way to add exceptions for trusted sites).
-	//
-	// This is not a huge problem because every POST/DELETE/etc. request already
-	// has a CSRF token in the request, which protects against the same thing as
-	// SameSite does. We could enable it only for sites that have "embed
-	// GoatCounter" enabled (which aren't that many sites), but then people need
-	// to logout and login again to reset the cookie, which isn't ideal.
-	//
-	// Only do this for secure connections, as Google Chrome developers decided
-	// to silently reject these cookies if there's no TLS.
-	if secure {
-		zhttp.CookieSameSite = http.SameSiteNoneMode
-	}
-
-	err = goatcounter.Memstore.Init(db)
-	if err != nil {
-		return nil, nil, nil, nil, 0, err
-	}
-
-	cron.Start(goatcounter.CopyContextValues(ctx))
-	return db, ctx, tlsc, acmeh, listenTLS, nil
-}
-
-func setupReload() {
 	if _, err := os.Stat("./tpl"); os.IsNotExist(err) {
-		return
+		return nil
 	}
 
 	go func() {
@@ -532,75 +454,79 @@ func setupReload() {
 			log.Errorf(context.Background(), "reload.Do: %v", err)
 		}
 	}()
+	return nil
 }
 
-func flagErrors(errors string, v *zvalidate.Validator) {
+func flagErrors(v *zvalidate.Validator, errors string) {
 	switch {
 	default:
 		v.Append("-errors", "invalid value")
 	case errors == "":
 		// Do nothing.
 	case strings.HasPrefix(errors, "mailto:"):
-		errors = errors[7:]
-		s := strings.Split(errors, ",")
-		from := s[0]
-		to := s[0]
-		if len(s) > 1 {
-			to = s[1]
+		to, from, _ := strings.Cut(errors[7:], ",")
+		if from == "" {
+			from = to
 		}
 
 		v.Email("-errors", from)
 		v.Email("-errors", to)
-		log.OnError = func(module string, r slog.Record) {
-			bgrun.RunFunction("email:error", func() {
-				buf := new(bytes.Buffer)
-				h := slog_align.NewAlignedHandler(buf, &slog.HandlerOptions{
-					ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-						if a.Key == "module" || a.Key == "_err" {
-							return slog.Attr{}
-						}
-						return a
-					},
-				})
-				h.SetTimeFormat("Jan _2 15:04:05 ")
-				h.SetColor(false)
-				h.SetInlineLocation(false)
-				h.Handle(context.Background(), r)
-
-				msg := buf.String()
-
-				// Silence spurious errors from some bot.
-				if strings.Contains(msg, `ReferenceError: "Pikaday" is not defined.`) &&
-					strings.Contains(msg, `Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.61 Safari/537.36`) {
-					return
-				}
-				// Don't need to send notifications for these
-				if strings.Contains(msg, `pq: canceling statement due to user request`) {
-					return
-				}
-
-				subject := zstring.GetLine(msg, 1)
-				if len(subject) > 15 { // Remove date: "Jun  8 00:51:41"
-					subject = strings.TrimSpace(subject[15:])
-				}
-				subject = strings.TrimPrefix(subject, "ERROR")
-				subject = strings.TrimLeft(subject, " \t:")
-
-				err := blackmail.Send(subject,
-					blackmail.From("", from),
-					blackmail.To(to),
-					blackmail.BodyText([]byte(msg)))
-				if err != nil {
-					// Just output to stderr I guess, can't really do much more if
-					// sending email fails.
-					fmt.Fprintf(zli.Stderr, "emailerrors: %s\n", err)
-				}
-			})
-		}
+		slog.SetDefault(slog.New(log.NewChain(
+			slog.Default().Handler(),
+			email_log.New(slog.LevelWarn, from, to),
+		)))
 	}
 }
 
-func flagFrom(from, domain string, v *zvalidate.Validator) string {
+func flagEmail(v *zvalidate.Validator, smtp string) {
+	if smtp != blackmail.ConnectDirect && smtp != blackmail.ConnectWriter {
+		v.URLLocal("-smtp", smtp)
+	}
+	blackmail.DefaultMailer = blackmail.NewMailer(smtp)
+}
+
+func setupGeo(v *zvalidate.Validator, geodbFlag string) *geoip2.Reader {
+	if geodbFlag == "" {
+		ls, _ := os.ReadDir("goatcounter-data")
+		for _, f := range ls {
+			if strings.HasSuffix(f.Name(), ".mmdb") {
+				geodbFlag = "goatcounter-data/" + f.Name()
+				break
+			}
+		}
+	}
+	geodb, err := geo.Open(geodbFlag)
+	if err != nil {
+		v.Append("-geodb", fmt.Sprintf("loading GeoIP database: %s", err))
+	}
+	return geodb
+}
+
+func setupRatelimits(v *zvalidate.Validator, ratelimit string) handlers.Ratelimits {
+	h := handlers.NewRatelimits()
+	if ratelimit != "" {
+		for _, r := range strings.Split(ratelimit, ",") {
+			name, spec, _ := strings.Cut(r, ":")
+			reqs, secs, _ := strings.Cut(spec, "/")
+
+			v2 := zvalidate.New()
+			v2.Required("-ratelimit.name", name)
+			v2.Required("-ratelimit.requests", reqs)
+			v2.Required("-ratelimit.seconds", secs)
+			nn := v2.Include("-ratelimit.name", name, []string{"count", "api", "api-count", "export", "login"})
+			name = nn.(string)
+			r := v2.Integer("-ratelimit.requests", reqs)
+			s := v2.Integer("-ratelimit.seconds", secs)
+			if v2.HasErrors() {
+				v.Merge(v2)
+			}
+			h.Set(name, int(r), s)
+		}
+	}
+	return h
+}
+
+func flagFrom(v *zvalidate.Validator, from, domain string) string {
 	if from == "" {
 		if domain != "" { // saas only.
 			from = "support@" + znet.RemovePort(domain)
@@ -644,7 +570,86 @@ func lsSites(ctx context.Context) ([]string, error) {
 	return cnames, nil
 }
 
-func startupAttr(geomd geometa, listen string, dev bool, attr ...any) []any {
+func setupDomains(v *zvalidate.Validator, saas, dev bool, domain, domainStatic *string) (string, string) {
+	var domainCount, urlStatic string
+	if saas {
+		*domain, *domainStatic, domainCount, urlStatic = flagDomain(v, *domain)
+		if !dev && *domain != "goatcounter.com" {
+			v.Append("saas", "can only run on goatcounter.com")
+		}
+	} else {
+		if *domainStatic != "" {
+			if p := strings.Index(*domainStatic, ":"); p > -1 {
+				v.Domain("-static", (*domainStatic)[:p])
+			} else {
+				v.Domain("-static", *domainStatic)
+			}
+			urlStatic = "//" + *domainStatic
+			domainCount = *domainStatic
+		} else {
+			urlStatic = zhttp.BasePath
+		}
+	}
+	return domainCount, urlStatic
+}
+
+func flagDomain(v *zvalidate.Validator, domain string) (string, string, string, string) {
+	l := strings.Split(domain, ",")
+
+	var (
+		rDomain      string
+		domainStatic string
+		domainCount  string
+		urlStatic    string
+	)
+	switch len(l) {
+	default:
+		v.Append("-domain", "too many domains")
+	case 0:
+		v.Append("-domain", "cannot be blank")
+	case 1:
+		v.Append("-domain", "must have static domain")
+	case 2, 3:
+		for i, d := range l {
+			d = strings.TrimSpace(d)
+			if p := strings.Index(d, ":"); p > -1 {
+				v.Domain("-domain", d[:p])
+			} else {
+				v.Domain("-domain", d)
+			}
+
+			switch i {
+			case 0:
+				rDomain = d
+			case 1:
+				domainStatic = d
+				domainCount = d
+				urlStatic = "//" + d
+			case 2:
+				domainCount = d
+			}
+		}
+	}
+	return rDomain, domainStatic, domainCount, urlStatic
+}
+
+func setupTpl(ctx context.Context, dev bool) error {
+	fsys, err := zfs.EmbedOrDir(goatcounter.Templates, "tpl", dev)
+	if err != nil {
+		return err
+	}
+	err = ztpl.Init(fsys)
+	if err != nil {
+		if !dev {
+			return err
+		}
+		log.Error(ctx, err)
+	}
+	return nil
+}
+
+func startupAttr(geodb *geoip2.Reader, listen string, dev bool, attr ...any) []any {
+	md := geodb.DB().Metadata
 	return append(attr,
 		"listen", listen,
 		"dev", dev,
@@ -657,11 +662,11 @@ func startupAttr(geomd geometa, listen string, dev bool, attr ...any) []any {
 			"race", zruntime.Race,
 		),
 		slog.Group("geoip",
-			"path", geomd.path,
-			"build", time.Unix(int64(geomd.md.BuildEpoch), 0).UTC().Format("2006-01-02 15:04:05"),
-			"type", geomd.md.DatabaseType,
-			"description", geomd.md.Description["en"],
-			"nodes", geomd.md.NodeCount,
+			"path", geodb.DB().Path,
+			"build", time.Unix(int64(md.BuildEpoch), 0).UTC().Format("2006-01-02 15:04:05"),
+			"type", md.DatabaseType,
+			"description", md.Description["en"],
+			"nodes", md.NodeCount,
 		),
 	)
 }

@@ -29,7 +29,7 @@ func TestHitStats(t *testing.T) {
 		Hit{Path: "/y", Location: "ID-BA", Size: []float64{800, 600, 2}, UserAgentHeader: "Mozilla/5.0 (X11; Linux x86_64; Ubuntu; rv:79.0) Gecko/20100101 Firefox/79.0", FirstVisit: true},
 	)
 
-	rng := ztime.NewRange(ztime.Now()).To(ztime.Now())
+	rng := ztime.NewRange(ztime.Now(ctx)).To(ztime.Now(ctx))
 
 	cmp := func(t *testing.T, want string, stats ...HitStats) {
 		t.Helper()
@@ -43,7 +43,7 @@ func TestHitStats(t *testing.T) {
 		}
 	}
 
-	for _, filter := range [][]int64{nil} {
+	for _, filter := range [][]PathID{nil} {
 		// Browsers
 		{
 			var list HitStats
@@ -135,14 +135,9 @@ func TestHitStats(t *testing.T) {
 						"count": 0
 					},
 					{
-						"id": "largephone",
-						"name": "",
-						"count": 1
-					},
-					{
 						"id": "tablet",
 						"name": "",
-						"count": 0
+						"count": 1
 					},
 					{
 						"id": "desktop",
@@ -237,23 +232,21 @@ func TestListSizes(t *testing.T) {
 
 	// Copy from hit_stats
 	const (
-		sizePhones      = "phone"
-		sizeLargePhones = "largephone"
-		sizeTablets     = "tablet"
-		sizeDesktop     = "desktop"
-		sizeDesktopHD   = "desktophd"
-		sizeUnknown     = "unknown"
+		sizePhones    = "phone"
+		sizeTablets   = "tablet"
+		sizeDesktop   = "desktop"
+		sizeDesktopHD = "desktophd"
+		sizeUnknown   = "unknown"
 	)
 
-	now := ztime.Now()
+	now := ztime.Now(ctx)
 	widths := []struct {
 		w  float64
 		id string
 	}{
 		{0, sizeUnknown},
-		{300, sizePhones},
-		{1000, sizeLargePhones},
-		{1100, sizeTablets},
+		{600, sizePhones},
+		{1000, sizeTablets},
 		{1920, sizeDesktop},
 		{3000, sizeDesktopHD},
 	}
@@ -284,11 +277,6 @@ func TestListSizes(t *testing.T) {
 			"stats": [
 				{
 					"id": "phone",
-					"name": "",
-					"count": 1
-				},
-				{
-					"id": "largephone",
 					"name": "",
 					"count": 1
 				},
@@ -343,7 +331,7 @@ func TestListSizes(t *testing.T) {
 			"more": false,
 			"stats": [
 				{
-					"name": "↔\ufe0e 300px",
+					"name": "↔\ufe0e 600px",
 					"count": 1
 				}
 			]
@@ -352,14 +340,6 @@ func TestListSizes(t *testing.T) {
 			"stats": [
 				{
 					"name": "↔\ufe0e 1000px",
-					"count": 1
-				}
-			]
-		}{
-			"more": false,
-			"stats": [
-				{
-					"name": "↔\ufe0e 1100px",
 					"count": 1
 				}
 			]
@@ -398,13 +378,13 @@ func TestStatsByRef(t *testing.T) {
 	ctx := gctest.DB(t)
 
 	gctest.StoreHits(ctx, t, false,
-		Hit{Path: "/a", Ref: "https://example.com"},
-		Hit{Path: "/b", Ref: "https://example.com"},
-		Hit{Path: "/a", Ref: "https://example.org"})
+		Hit{Path: "/a", Ref: "https://example.com", FirstVisit: true},
+		Hit{Path: "/b", Ref: "https://example.com", FirstVisit: true},
+		Hit{Path: "/a", Ref: "https://example.org", FirstVisit: true})
 
 	var have HitStats
-	err := have.ListTopRef(ctx, "example.com", ztime.NewRange(ztime.Now().Add(-1*time.Hour)).To(ztime.Now().Add(1*time.Hour)),
-		[]int64{1}, 10, 0)
+	err := have.ListTopRef(ctx, "example.com", ztime.NewRange(ztime.Now(ctx).Add(-1*time.Hour)).To(ztime.Now(ctx).Add(1*time.Hour)),
+		[]PathID{1}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +392,7 @@ func TestStatsByRef(t *testing.T) {
 	want := `{
 		"more": false,
 		"stats": [{
-			"count": 0,
+			"count": 1,
 			"name": "/a"
 		}]
 	}`

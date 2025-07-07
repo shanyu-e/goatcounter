@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/json"
 	"zgo.at/zdb"
 	"zgo.at/zstd/zbool"
@@ -38,10 +38,10 @@ type ms struct {
 	hits  []Hit
 
 	sessionMu     sync.RWMutex
-	sessions      map[sessionKey]zint.Uint128         // sessionKey → sessionID
-	sessionHashes map[zint.Uint128]sessionKey         // sessionID → sessionKey
-	sessionPaths  map[zint.Uint128]map[int64]struct{} // SessionID → path_id
-	sessionSeen   map[zint.Uint128]int64              // SessionID → lastseen
+	sessions      map[sessionKey]zint.Uint128          // sessionKey → sessionID
+	sessionHashes map[zint.Uint128]sessionKey          // sessionID → sessionKey
+	sessionPaths  map[zint.Uint128]map[PathID]struct{} // SessionID → path_id
+	sessionSeen   map[zint.Uint128]int64               // SessionID → lastseen
 
 	testHook bool
 }
@@ -49,10 +49,10 @@ type ms struct {
 var Memstore ms
 
 type storedSession struct {
-	Sessions map[sessionKey]zint.Uint128         `json:"sessions"`
-	Hashes   map[zint.Uint128]sessionKey         `json:"hashes"`
-	Paths    map[zint.Uint128]map[int64]struct{} `json:"paths"`
-	Seen     map[zint.Uint128]int64              `json:"seen"`
+	Sessions map[sessionKey]zint.Uint128          `json:"sessions"`
+	Hashes   map[zint.Uint128]sessionKey          `json:"hashes"`
+	Paths    map[zint.Uint128]map[PathID]struct{} `json:"paths"`
+	Seen     map[zint.Uint128]int64               `json:"seen"`
 }
 
 func (m *ms) Reset() {
@@ -61,7 +61,7 @@ func (m *ms) Reset() {
 
 	m.sessions = make(map[sessionKey]zint.Uint128)
 	m.sessionHashes = make(map[zint.Uint128]sessionKey)
-	m.sessionPaths = make(map[zint.Uint128]map[int64]struct{})
+	m.sessionPaths = make(map[zint.Uint128]map[PathID]struct{})
 	m.sessionSeen = make(map[zint.Uint128]int64)
 	TestSeqSession = zint.Uint128{TestSession[0], TestSession[1] + 1}
 }
@@ -147,6 +147,7 @@ func (m *ms) StoreSessions(db zdb.DB) {
 	}
 
 	memlog.Debug(context.Background(), "stored sessions in DB on shutdown",
+		"bytesize", len(d),
 		"sessions", len(m.sessions),
 		"sessionHashes", len(m.sessionHashes),
 		"sessionPaths", len(m.sessionPaths),
@@ -207,24 +208,37 @@ func (m *ms) Persist(ctx context.Context) ([]Hit, error) {
 	m.hits = make([]Hit, 0, 16)
 	m.hitMu.Unlock()
 
-	newHits := make([]Hit, 0, len(hits))
-	ins := zdb.NewBulkInsert(ctx, "hits", []string{"site_id", "path_id", "ref_id",
-		"browser_id", "system_id", "size_id", "location", "language", "created_at", "bot",
-		"session", "first_visit", "campaign"})
+	var (
+		newHits = make([]Hit, 0, len(hits))
+		bot     = zdb.NewBulkInsert(ctx, "bots", []string{"site_id", "path", "bot", "user_agent", "created_at"})
+		ins     = zdb.NewBulkInsert(ctx, "hits", []string{"site_id", "path_id", "ref_id", "browser_id", "system_id",
+			"width", "location", "language", "created_at", "session", "first_visit", "campaign"})
+	)
 	for _, h := range hits {
+		if h.Bot > 0 {
+			bot.Values(h.Site, h.Path, h.Bot, h.UserAgentHeader, h.CreatedAt)
+			continue
+		}
 		if m.processHit(ctx, &h) {
 			// Don't return hits that failed validation; otherwise cron will try to
 			// insert them.
 			newHits = append(newHits, h)
 
 			if !h.NoStore {
-				ins.Values(h.Site, h.PathID, h.RefID, h.BrowserID, h.SystemID, h.SizeID,
-					h.Location, h.Language, h.CreatedAt.Round(time.Second), h.Bot, h.Session,
-					h.FirstVisit, h.CampaignID)
+				var w *float64
+				if len(h.Size) > 0 {
+					w = &h.Size[0]
+				}
+				ins.Values(h.Site, h.PathID, h.RefID, h.BrowserID, h.SystemID, w, h.Location,
+					h.Language, h.CreatedAt.Round(time.Second), h.Session, h.FirstVisit, h.CampaignID)
 			}
 		}
 	}
 
+	// Just log errors on inserting bots; not that important.
+	if err := bot.Finish(); err != nil {
+		memlog.Errorf(ctx, "storing bots: %s", err)
+	}
 	return newHits, ins.Finish()
 }
 
@@ -256,10 +270,7 @@ func (m *ms) processHit(ctx context.Context, h *Hit) bool {
 	}
 
 	if !site.Settings.Collect.Has(CollectReferrer) {
-		h.Query = ""
-		h.Ref = ""
-		h.RefScheme = nil
-		h.RefURL = nil
+		h.Query, h.Ref, h.RefScheme, h.RefURL = "", "", nil, nil
 	}
 
 	err = h.Defaults(ctx, false)
@@ -277,17 +288,13 @@ func (m *ms) processHit(ctx context.Context, h *Hit) bool {
 	}
 
 	if !site.Settings.Collect.Has(CollectSession) {
-		h.Session = zint.Uint128{}
-		h.FirstVisit = true
+		h.Session, h.FirstVisit = zint.Uint128{}, true
 	}
-
 	if !site.Settings.Collect.Has(CollectScreenSize) {
 		h.Size = nil
 	}
 	if !site.Settings.Collect.Has(CollectUserAgent) {
-		h.UserAgentHeader = ""
-		h.BrowserID = 0
-		h.SystemID = 0
+		h.UserAgentHeader, h.BrowserID, h.SystemID = "", 0, 0
 	}
 	if !site.Settings.Collect.Has(CollectLanguage) {
 		h.Language = nil
@@ -328,11 +335,11 @@ var SessionTime = 8 * time.Hour
 // For 10k sessions this takes about 5ms on my laptop; that's a small enough
 // delay to not overly worry about (there are rarely more than a few hundred
 // sessions at a time).
-func (m *ms) EvictSessions() {
+func (m *ms) EvictSessions(ctx context.Context) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 
-	ev := ztime.Now().Add(-SessionTime).Unix()
+	ev := ztime.Now(ctx).Add(-SessionTime).Unix()
 	for id, seen := range m.sessionSeen {
 		if seen > ev {
 			continue
@@ -361,7 +368,7 @@ func (m *ms) SessionID() zint.Uint128 {
 	return UUID()
 }
 
-func (m *ms) session(ctx context.Context, siteID, pathID int64, userSessionID, ua, remoteAddr string) (zint.Uint128, zbool.Bool) {
+func (m *ms) session(ctx context.Context, siteID SiteID, pathID PathID, userSessionID, ua, remoteAddr string) (zint.Uint128, zbool.Bool) {
 	sk := sessionKey(userSessionID)
 	if userSessionID == "" {
 		sk = sessionKey(fmt.Sprintf("%s-%s-%d", ua, remoteAddr, siteID))
@@ -372,7 +379,7 @@ func (m *ms) session(ctx context.Context, siteID, pathID int64, userSessionID, u
 
 	id, ok := m.sessions[sk]
 	if ok { // Existing session
-		m.sessionSeen[id] = ztime.Now().Unix()
+		m.sessionSeen[id] = ztime.Now(ctx).Unix()
 		_, seenPath := m.sessionPaths[id][pathID]
 		if !seenPath {
 			m.sessionPaths[id][pathID] = struct{}{}
@@ -389,8 +396,8 @@ func (m *ms) session(ctx context.Context, siteID, pathID int64, userSessionID, u
 	// New session
 	id = m.SessionID()
 	m.sessions[sk] = id
-	m.sessionPaths[id] = map[int64]struct{}{pathID: struct{}{}}
-	m.sessionSeen[id] = ztime.Now().Unix()
+	m.sessionPaths[id] = map[PathID]struct{}{pathID: struct{}{}}
+	m.sessionSeen[id] = ztime.Now(ctx).Unix()
 	m.sessionHashes[id] = sk
 
 	sesslog.Debug(ctx, "MISS: created new",

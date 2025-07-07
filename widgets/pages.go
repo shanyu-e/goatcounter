@@ -3,13 +3,13 @@ package widgets
 import (
 	"context"
 	"html/template"
-	"strconv"
 	"sync"
 
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/z18n"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/ztime"
 )
 
@@ -20,7 +20,7 @@ type Pages struct {
 	html   template.HTML
 	s      goatcounter.WidgetSettings
 
-	RefsForPath      int64
+	RefsForPath      goatcounter.PathID
 	Style            string
 	Limit, LimitRefs int
 	Display          int
@@ -28,7 +28,7 @@ type Pages struct {
 	Pages            goatcounter.HitLists
 	Refs             goatcounter.HitStats
 	Max              int
-	Exclude          []int64
+	Exclude          []goatcounter.PathID
 	Diff             []float64
 }
 
@@ -51,7 +51,7 @@ func (w *Pages) SetSettings(s goatcounter.WidgetSettings) {
 		w.LimitRefs = int(x.(float64))
 	}
 	if x := s["key"].Value; x != nil {
-		w.RefsForPath, _ = strconv.ParseInt(x.(string), 10, 64)
+		w.RefsForPath, _ = zstrconv.ParseInt[goatcounter.PathID](x.(string), 10)
 	}
 	if x := s["style"].Value; x != nil {
 		w.Style = x.(string)
@@ -78,7 +78,7 @@ func (w *Pages) GetData(ctx context.Context, a Args) (bool, error) {
 	}
 
 	var err error
-	w.Display, w.More, err = w.Pages.List(ctx, a.Rng, a.PathFilter, w.Exclude, w.Limit, a.Daily)
+	w.Display, w.More, err = w.Pages.List(ctx, a.Rng, a.PathFilter, w.Exclude, w.Limit, a.Group)
 	errs.Append(err)
 
 	if !goatcounter.MustGetUser(ctx).Settings.FewerNumbers {
@@ -140,7 +140,7 @@ func (w Pages) RenderHTML(ctx context.Context, shared SharedData) (string, any) 
 		// Only remove them if the last day is today: for everything else we
 		// want to display the future as "greyed out".
 		var (
-			now   = ztime.Now().In(goatcounter.MustGetUser(ctx).Settings.Timezone.Loc())
+			now   = ztime.Now(ctx).In(goatcounter.MustGetUser(ctx).Settings.Timezone.Loc())
 			today = now.Format("2006-01-02")
 			hour  = now.Hour()
 		)
@@ -162,8 +162,8 @@ func (w Pages) RenderHTML(ctx context.Context, shared SharedData) (string, any) 
 		Err         error
 		Pages       goatcounter.HitLists
 		Period      ztime.Range
-		Daily       bool
-		ForcedDaily bool
+		Group       goatcounter.Group
+		ForcedGroup bool
 		Offset      int
 		Max         int
 
@@ -174,12 +174,12 @@ func (w Pages) RenderHTML(ctx context.Context, shared SharedData) (string, any) 
 
 		Style    string
 		Refs     goatcounter.HitStats
-		ShowRefs int64
+		ShowRefs goatcounter.PathID
 		Diff     []float64
 	}{
 		ctx, shared.Site, shared.User,
-		w.id, w.loaded, w.err, w.Pages, shared.Args.Rng, shared.Args.Daily,
-		shared.Args.ForcedDaily, 1, w.Max,
+		w.id, w.loaded, w.err, w.Pages, shared.Args.Rng, shared.Args.Group,
+		shared.Args.ForcedGroup, len(w.Exclude) + 1, w.Max,
 		w.Display, shared.Total, shared.TotalEvents, w.More,
 		w.Style, w.Refs, shared.Args.ShowRefs,
 		w.Diff,

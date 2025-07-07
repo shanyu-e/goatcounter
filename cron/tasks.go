@@ -11,7 +11,7 @@ import (
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/acme"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/zdb"
 	"zgo.at/zstd/ztime"
 )
@@ -41,7 +41,7 @@ func oldExports(ctx context.Context) error {
 			continue
 		}
 
-		if st.ModTime().Before(ztime.Now().Add(-24 * time.Hour)) {
+		if st.ModTime().Before(ztime.Now(ctx).Add(-24 * time.Hour)) {
 			err := os.Remove(f)
 			if err != nil {
 				log.Errorf(ctx, "cron.oldExports: %s", err)
@@ -75,7 +75,7 @@ func dataRetention(ctx context.Context) error {
 
 func oldBot(ctx context.Context) error {
 	ival := goatcounter.Interval(ctx, 30)
-	err := zdb.Exec(ctx, `delete from hits where bot > 0 and created_at < `+ival)
+	err := zdb.Exec(ctx, `delete from bots where created_at < `+ival)
 	if err != nil {
 		log.Module("cron").Error(ctx, err)
 	}
@@ -86,15 +86,16 @@ func persistAndStat(ctx context.Context) error {
 	l := log.Module("cron")
 	l.Debug(ctx, "persistAndStat started")
 
-	start := ztime.Now()
+	start := ztime.Now(ctx)
 	hits, err := goatcounter.Memstore.Persist(ctx)
 	if err != nil {
 		return err
 	}
+	tookMemstore := time.Since(start).Round(time.Millisecond)
 
 	var (
-		startStats = ztime.Now()
-		grouped    = make(map[int64][]goatcounter.Hit)
+		startStats = ztime.Now(ctx)
+		grouped    = make(map[goatcounter.SiteID][]goatcounter.Hit)
 	)
 	for _, h := range hits {
 		if h.Bot > 0 {
@@ -113,7 +114,7 @@ func persistAndStat(ctx context.Context) error {
 		l.Debug(ctx, "persisted hits",
 			"num", len(hits),
 			slog.Group("took",
-				"memstore", time.Since(start).Round(time.Millisecond),
+				"memstore", tookMemstore,
 				"stats", time.Since(startStats).Round(time.Millisecond),
 			))
 	}
@@ -123,7 +124,7 @@ func persistAndStat(ctx context.Context) error {
 // UpdateStats updates all the stats tables.
 //
 // Exported for tests.
-func UpdateStats(ctx context.Context, site *goatcounter.Site, siteID int64, hits []goatcounter.Hit) error {
+func UpdateStats(ctx context.Context, site *goatcounter.Site, siteID goatcounter.SiteID, hits []goatcounter.Hit) error {
 	if site == nil {
 		site = new(goatcounter.Site)
 		err := site.ByID(ctx, siteID)
@@ -225,6 +226,6 @@ func vacuumDeleted(ctx context.Context) error {
 }
 
 func sessions(ctx context.Context) error {
-	goatcounter.Memstore.EvictSessions()
+	goatcounter.Memstore.EvictSessions(ctx)
 	return nil
 }

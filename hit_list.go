@@ -3,7 +3,6 @@ package goatcounter
 import (
 	"context"
 	"sort"
-	"strconv"
 	"time"
 
 	"zgo.at/errors"
@@ -11,15 +10,35 @@ import (
 	"zgo.at/zdb"
 	"zgo.at/zstd/zbool"
 	"zgo.at/zstd/zjson"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/ztime"
 )
+
+type Group uint8
+
+func (g Group) Hourly() bool { return g == GroupHourly }
+func (g Group) Daily() bool  { return g == GroupDaily }
+func (g Group) String() string {
+	switch g {
+	case GroupDaily:
+		return "day"
+	}
+	return "hour"
+}
+
+const (
+	GroupHourly = Group(iota)
+	GroupDaily
+)
+
+var Groups = []Group{GroupHourly, GroupDaily}
 
 type HitList struct {
 	// Number of visitors for the selected date range.
 	Count int `db:"count" json:"count"`
 
 	// Path ID
-	PathID int64 `db:"path_id" json:"path_id"`
+	PathID PathID `db:"path_id" json:"path_id"`
 
 	// Path name (e.g. /hello.html).
 	Path string `db:"path" json:"path"`
@@ -65,7 +84,7 @@ func (h *HitList) PathCount(ctx context.Context, path string, rng ztime.Range) e
 
 // SiteTotal gets the total counts for all paths. This always uses UTC.
 func (h *HitList) SiteTotalUTC(ctx context.Context, rng ztime.Range) error {
-	err := zdb.Get(ctx, h, `/* *HitList.SiteTotalUTC */
+	err := zdb.Get(ctx, h, `/* HitList.SiteTotalUTC */
 			select
 				coalesce(sum(total), 0) as count
 			from hit_counts
@@ -97,8 +116,9 @@ var allDays = []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 
 // List the top paths for this site in the given time period.
 func (h *HitLists) List(
-	ctx context.Context, rng ztime.Range, pathFilter, exclude []int64, limit int, daily bool,
+	ctx context.Context, rng ztime.Range, pathFilter, exclude []PathID, limit int, group Group,
 ) (int, bool, error) {
+
 	site := MustGetSite(ctx)
 	user := MustGetUser(ctx)
 
@@ -109,9 +129,10 @@ func (h *HitLists) List(
 			"site":    site.ID,
 			"start":   rng.Start,
 			"end":     rng.End,
-			"filter":  pathFilter,
+			"filter":  pgArray(ctx, pathFilter),
+			"in":      pgIn(ctx),
+			"exclude": pgArray(ctx, exclude),
 			"limit":   limit + 1,
-			"exclude": exclude,
 		})
 		if err != nil {
 			return 0, false, errors.Wrap(err, "HitLists.List hit_counts")
@@ -133,12 +154,12 @@ func (h *HitLists) List(
 	// Get stats for every page.
 	hh := *h
 	var st []struct {
-		PathID int64     `db:"path_id"`
+		PathID PathID    `db:"path_id"`
 		Day    time.Time `db:"day"`
 		Stats  []byte    `db:"stats"`
 	}
 	{
-		paths := make([]int64, len(hh))
+		paths := make([]PathID, len(hh))
 		for i := range hh {
 			paths[i] = hh[i].PathID
 		}
@@ -147,7 +168,8 @@ func (h *HitLists) List(
 			"site":  site.ID,
 			"start": rng.Start.Format("2006-01-02"),
 			"end":   rng.End.Format("2006-01-02"),
-			"paths": paths,
+			"paths": pgArray(ctx, paths),
+			"in":    pgIn(ctx),
 		})
 		if err != nil {
 			return 0, false, errors.Wrap(err, "HitLists.List hit_stats")
@@ -175,7 +197,7 @@ func (h *HitLists) List(
 
 	// Add total and max.
 	var totalDisplay int
-	addTotals(hh, daily, &totalDisplay)
+	addTotals(hh, group, &totalDisplay)
 
 	return totalDisplay, more, nil
 }
@@ -186,7 +208,7 @@ func (h *HitLists) List(
 const PathTotals = "TOTAL "
 
 // Totals gets the data for the "Totals" chart/widget.
-func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []int64, daily, noEvents bool) (int, error) {
+func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []PathID, group Group, noEvents bool) (int, error) {
 	site := MustGetSite(ctx)
 	user := MustGetUser(ctx)
 
@@ -198,7 +220,8 @@ func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []int6
 		"site":      site.ID,
 		"start":     rng.Start,
 		"end":       rng.End,
-		"filter":    pathFilter,
+		"filter":    pgArray(ctx, pathFilter),
+		"in":        pgIn(ctx),
 		"no_events": noEvents,
 	})
 	if err != nil {
@@ -212,7 +235,7 @@ func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []int6
 	stats := make(map[string]HitListStat)
 	for _, t := range tc {
 		d := t.Hour.Format("2006-01-02")
-		hour, _ := strconv.ParseInt(t.Hour.Format("15"), 10, 32)
+		hour, _ := zstrconv.ParseInt[int32](t.Hour.Format("15"), 10)
 		s, ok := stats[d]
 		if !ok {
 			s = HitListStat{
@@ -230,7 +253,7 @@ func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []int6
 	max := 0
 	for _, v := range stats {
 		totalst.Stats = append(totalst.Stats, v)
-		if !daily {
+		if group.Hourly() {
 			for _, x := range v.Hourly {
 				if x > max {
 					max = x
@@ -247,12 +270,12 @@ func (h *HitList) Totals(ctx context.Context, rng ztime.Range, pathFilter []int6
 	fillBlankDays(hh, rng)
 	applyOffset(hh, user.Settings.Timezone)
 
-	if daily {
+	if group.Daily() {
 		for i := range hh[0].Stats {
 			for _, n := range hh[0].Stats[i].Hourly {
 				hh[0].Stats[i].Daily += n
 			}
-			if daily && hh[0].Stats[i].Daily > max {
+			if hh[0].Stats[i].Daily > max {
 				max = hh[0].Stats[i].Daily
 			}
 		}
@@ -373,18 +396,18 @@ func fillBlankDays(hh HitLists, rng ztime.Range) {
 	}
 }
 
-func addTotals(hh HitLists, daily bool, totalDisplay *int) {
+func addTotals(hh HitLists, group Group, totalDisplay *int) {
 	for i := range hh {
 		for j := range hh[i].Stats {
 			for k := range hh[i].Stats[j].Hourly {
 				hh[i].Stats[j].Daily += hh[i].Stats[j].Hourly[k]
-				if !daily && hh[i].Stats[j].Hourly[k] > hh[i].Max {
+				if !group.Daily() && hh[i].Stats[j].Hourly[k] > hh[i].Max {
 					hh[i].Max = hh[i].Stats[j].Hourly[k]
 				}
 			}
 
 			hh[i].Count += hh[i].Stats[j].Daily
-			if daily && hh[i].Stats[j].Daily > hh[i].Max {
+			if group.Daily() && hh[i].Stats[j].Daily > hh[i].Max {
 				hh[i].Max = hh[i].Stats[j].Daily
 			}
 		}
@@ -422,7 +445,7 @@ type TotalCount struct {
 // UTC. This is needed since the _stats tables are per day, rather than
 // per-hour, so we need to use the correct totals to make sure the percentage
 // calculations are accurate.
-func GetTotalCount(ctx context.Context, rng ztime.Range, pathFilter []int64, noEvents bool) (TotalCount, error) {
+func GetTotalCount(ctx context.Context, rng ztime.Range, pathFilter []PathID, noEvents bool) (TotalCount, error) {
 	site := MustGetSite(ctx)
 	user := MustGetUser(ctx)
 
@@ -433,7 +456,8 @@ func GetTotalCount(ctx context.Context, rng ztime.Range, pathFilter []int64, noE
 		"end":       rng.End,
 		"start_utc": rng.Start.In(user.Settings.Timezone.Location),
 		"end_utc":   rng.End.In(user.Settings.Timezone.Location),
-		"filter":    pathFilter,
+		"filter":    pgArray(ctx, pathFilter),
+		"in":        pgIn(ctx),
 		"no_events": noEvents,
 		"tz":        user.Settings.Timezone.Offset(),
 	})
@@ -454,7 +478,7 @@ func (h HitLists) Diff(ctx context.Context, rng, prev ztime.Range) ([]float64, e
 	d := -rng.End.Sub(rng.Start)
 	prev = ztime.NewRange(rng.Start.Add(d)).To(rng.End.Add(d))
 
-	paths := make([]int64, 0, len(h))
+	paths := make([]PathID, 0, len(h))
 	for _, hh := range h {
 		paths = append(paths, hh.PathID)
 	}
@@ -466,7 +490,8 @@ func (h HitLists) Diff(ctx context.Context, rng, prev ztime.Range) ([]float64, e
 		"end":       rng.End,
 		"prevstart": prev.Start,
 		"prevend":   prev.End,
-		"paths":     paths,
+		"paths":     pgArray(ctx, paths),
+		"in":        pgIn(ctx),
 	})
 	return diffs, errors.Wrap(err, "HitList.DiffTotal")
 }

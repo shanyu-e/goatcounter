@@ -23,7 +23,8 @@ footer a   { font-weight: bold; color: var(--text); margin: 0 .5em; }
 .form-max-width label, .form-max-width textarea, .form-max-width input {
     max-width: 50em;
 }
-.form-max-width label { display: inline-block; }
+.form-max-width label { display:inline-block; }
+label.inline          { display:inline; }
 
 #js-settings, #js-csrf, #js-i18n { display: none; }
 
@@ -55,7 +56,9 @@ h3, h4     { margin-bottom: 0; }
 h3+p, h4+p { margin-top: 0; }
 h3.border  { border-bottom: 1px solid #666; margin-bottom: .2em; }
 
-form .err  { color: var(--form-error-text); display: block; }
+form .err        { color:var(--form-error-text); display:block; }
+form .disabled,
+form *[disabled] { color:var(--pageviews-text); cursor:not-allowed;}
 
 span.red  { color: var(--form-error-text); }
 input.red { border: 1px solid var(--input-error-border) !important; }
@@ -276,7 +279,11 @@ tr.target .chart-left { display: block; }
 .period-half-year [value=half-year],
 .period-year [value=year],
 .period-week-cur [value=week-cur],
-.period-month-cur [value=month-cur] {
+.period-month-cur [value=month-cur],
+.period-year-cur [value=year-cur],
+.group-hour [value=hour],
+.group-day [value=day],
+.group-week [value=week] {
     font-weight: bold;
     text-decoration: underline;
 }
@@ -312,8 +319,11 @@ tr.target .chart-left { display: block; }
 
 /*** Settings page
  *******************/
-#page-settings-main #secret { display: none; margin-left: 1em; padding-left: 1em; border-left: 1px solid #aaa; }
+#page-settings-main #secret { display:none; margin-left:1em; padding-left:1em; border-left:1px solid #aaa; }
 .purge-err                  { margin-left:1em; margin-top:1em; }
+.user-api-key               { width:100%; }
+.user-api-key td            { vertical-align:top; }
+.user-api-key ul            { margin:0; padding-left:1em; }
 
 /*** Widget settings
  *******************/

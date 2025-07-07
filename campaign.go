@@ -8,10 +8,12 @@ import (
 	"zgo.at/zvalidate"
 )
 
+type CampaignID int32
+
 type Campaign struct {
-	ID     int64  `db:"campaign_id" json:"campaign_id"`
-	SiteID int64  `db:"site_id" json:"site_id"`
-	Name   string `db:"name" json:"name"`
+	ID     CampaignID `db:"campaign_id" json:"campaign_id"`
+	SiteID SiteID     `db:"site_id" json:"site_id"`
+	Name   string     `db:"name" json:"name"`
 }
 
 func (c *Campaign) Defaults(ctx context.Context) {}
@@ -33,7 +35,7 @@ func (c *Campaign) Insert(ctx context.Context) error {
 		return errors.Wrap(err, "Campaign.Insert")
 	}
 
-	c.ID, err = zdb.InsertID(ctx, "campaign_id",
+	c.ID, err = zdb.InsertID[CampaignID](ctx, "campaign_id",
 		`insert into campaigns (site_id, name) values (?, ?)`, MustGetSite(ctx).ID, c.Name)
 	if err != nil {
 		return errors.Wrap(err, "Campaign.Insert")
@@ -44,7 +46,7 @@ func (c *Campaign) Insert(ctx context.Context) error {
 func (c *Campaign) ByName(ctx context.Context, name string) error {
 	k := c.Name
 	if cc, ok := cacheCampaigns(ctx).Get(k); ok {
-		*c = *cc.(*Campaign)
+		*c = *cc
 		return nil
 	}
 
@@ -54,6 +56,6 @@ func (c *Campaign) ByName(ctx context.Context, name string) error {
 		return errors.Wrap(err, "Campaign.ByName")
 	}
 
-	cacheCampaigns(ctx).SetDefault(k, c)
+	cacheCampaigns(ctx).Set(k, c)
 	return nil
 }

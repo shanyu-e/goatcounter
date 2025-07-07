@@ -8,13 +8,14 @@
 		window.CSRF              = $('#js-settings').attr('data-csrf')
 		window.TZ_OFFSET         = parseInt($('#js-settings').attr('data-offset'), 10) || 0
 		window.SITE_FIRST_HIT_AT = $('#js-settings').attr('data-first-hit-at') * 1000
+		window.GOATCOUNTER_COM   = $('#js-settings').attr('data-goatcounter-com') === 'true'
 		window.USE_WEBSOCKET     = $('#js-settings').attr('data-websocket') === 'true'
 		window.WEBSOCKET         = undefined
 		if (!USER_SETTINGS.language)
 			USER_SETTINGS.language = 'en'
 
 		;[report_errors, bind_tooltip, bind_confirm, translate_calendar, onetime].forEach((f) => f.call())
-		;[page_dashboard, page_settings_main, page_user_pref, page_user_dashboard, page_bosmang]
+		;[page_dashboard, page_settings_main, page_user_pref, page_user_api, page_user_dashboard, page_bosmang]
 			.forEach((f) => document.body.id.match(new RegExp('^' + f.name.replace(/_/g, '-'))) && f.call())
 	})
 
@@ -45,14 +46,17 @@
 			msg.indexOf('Exception invoking lineTo') !== -1 // Only from bot, never any details.
 		)
 			return
+
+		let stack = (err||{}).stack
+
 		// Don't log errors from extensions.
-		if (url.startsWith('chrome-extension://'))
+		if (url.startsWith('chrome-extension://') || stack.indexOf('@moz-extension://') !== -1)
 			return
 
 		jQuery.ajax({
 			url:    BASE_PATH + '/jserr',
 			method: 'POST',
-			data:    {msg: msg, url: url, line: line, column: column, stack: (err||{}).stack, ua: navigator.userAgent, loc: window.location+''},
+			data:    {msg: msg, url: url, line: line, column: column, stack: stack, ua: navigator.userAgent, loc: window.location+''},
 		})
 	}
 
@@ -180,6 +184,27 @@
 		$('[id="user.settings.fewer_numbers"]').on('change', function(e) {
 			$('#lock-settings').css('display', $(this).is(':checked') ? 'block' : 'none')
 		}).trigger('change')
+	}
+
+	let page_user_api = function() {
+		// Show API token
+		$('a[data-show]').on('click', (e) => {
+			e.preventDefault()
+			let elem = $(e.target)
+			elem.parent().text(elem.attr('data-show'))
+		})
+
+		// All sites
+		$('.allsites input').on('change', (e) => {
+			if (e.target.checked) {
+				$('.site').addClass('disabled')
+				$('.site input').attr('disabled', true).prop('checked', false)
+			} else {
+				$('.site').removeClass('disabled')
+				$('.site input').removeAttr('disabled')
+			}
+		})
+		$('.allsites input').trigger('change')
 	}
 
 	var page_user_dashboard = function() {

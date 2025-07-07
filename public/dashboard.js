@@ -21,8 +21,25 @@
 		if (window.WEBSOCKET && window.WEBSOCKET.readyState <= 1)
 			return
 
-		let cid  = $('#js-connect-id').text()
-		window.WEBSOCKET = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + document.location.host + BASE_PATH + '/loader?id=' + cid)
+		window.WEBSOCKET = new WebSocket(
+			(location.protocol === 'https:' ? 'wss://' : 'ws://') +
+			`${document.location.host}${BASE_PATH}/loader?id=${$('#js-connect-id').text()}`)
+
+		// Reload without websockets if that didn't work. We can't just use
+		// onerror, because both Firefox and Chrome may take up to a minute to
+		// call this error.
+		//
+		// The backend will outright disable Websockets if this happened three
+		// times in a row.
+		if (!window.GOATCOUNTER_COM) {
+			window.WEBSOCKET.onerror = () => {console.log("R"); push_query({'no-websocket': 1}); window.location.reload() }
+			window.WEBSOCKET.onopen  = () => { window.WEBSOCKET.onerror = null }
+			setTimeout(() => {
+				if (window.WEBSOCKET.readyState === 0)
+					window.WEBSOCKET.onerror()
+			}, 1000)
+		}
+
 		window.WEBSOCKET.onmessage = function(e) {
 			let msg = JSON.parse(e.data),
 				wid = $(`#dash-widgets div[data-widget=${msg.id}]`)
@@ -85,7 +102,7 @@
 	var reload_widget = function(wid, data, done) {
 		data = data || {}
 		data['widget'] = wid
-		data['daily']  = $('#daily').is(':checked')
+		data['group']  = $('#hl-group').val()
 		data['max']    = get_original_scale()
 		data['total']  = $('.js-total-utc').text()
 
@@ -110,7 +127,7 @@
 		jQuery.ajax({
 			url:     BASE_PATH + '/',
 			data:    append_period({
-				daily:     $('#daily').is(':checked'),
+				group:     $('#hl-group').val(),
 				max:       get_original_scale(),
 				reload:    't',
 				connectID: $('#js-connect-id').text(),
@@ -162,10 +179,8 @@
 
 	// Fill in start/end periods from buttons.
 	var hdr_select_period = function() {
-		// Reload dashboard when clicking a checkbox.
-		$('#dash-main input[type="checkbox"]').on('click', function(e) {
+		$('#dash-select-group').on('click', 'button', function(e) {
 			$('#hl-period').attr('disabled', false)
-			$('#dash-form').trigger('submit')
 		})
 
 		$('#dash-select-period').on('click', 'button', function(e) {
@@ -190,9 +205,14 @@
 					start.setDate(1)
 					end = new Date(end.getFullYear(), end.getMonth() + 1, 0)
 					break
+				case 'year-cur':
+					start = new Date(start.getFullYear(), 0, 1)
+					end = new Date(end.getFullYear(), 12, 0)
+					break
 			}
 
 			$('#hl-period').val(this.value).attr('disabled', false)
+			$('#hl-group').attr('disabled', false)
 			set_period(start, end)
 		})
 
@@ -206,12 +226,14 @@
 				return alert(T('error/date-future'))
 
 			switch (this.value) {
-				case 'day-b':     start.setDate(start.getDate()   - 1); end.setDate(end.getDate()   - 1); break;
-				case 'week-b':    start.setDate(start.getDate()   - 7); end.setDate(end.getDate()   - 7); break;
-				case 'month-b':   start.setMonth(start.getMonth() - 1); end.setMonth(end.getMonth() - 1); break;
-				case 'day-f':     start.setDate(start.getDate()   + 1); end.setDate(end.getDate()   + 1); break;
-				case 'week-f':    start.setDate(start.getDate()   + 7); end.setDate(end.getDate()   + 7); break;
-				case 'month-f':   start.setMonth(start.getMonth() + 1); end.setMonth(end.getMonth() + 1); break;
+				case 'day-b':     start.setDate(start.getDate()     - 1); end.setDate(end.getDate()     - 1); break;
+				case 'week-b':    start.setDate(start.getDate()     - 7); end.setDate(end.getDate()     - 7); break;
+				case 'month-b':   start.setMonth(start.getMonth()   - 1); end.setMonth(end.getMonth()   - 1); break;
+				case 'year-b':    start.setYear(start.getFullYear() - 1); end.setYear(end.getFullYear() - 1); break;
+				case 'day-f':     start.setDate(start.getDate()     + 1); end.setDate(end.getDate()     + 1); break;
+				case 'week-f':    start.setDate(start.getDate()     + 7); end.setDate(end.getDate()     + 7); break;
+				case 'month-f':   start.setMonth(start.getMonth()   + 1); end.setMonth(end.getMonth()   + 1); break;
+				case 'year-f':    start.setYear(start.getFullYear() + 1); end.setYear(end.getFullYear() + 1); break;
 			}
 			if (start.getDate() === 1 && this.value.substr(0, 5) === 'month')
 				end = new Date(start.getFullYear(), start.getMonth() + 1, 0)
@@ -328,7 +350,7 @@
 						csrf:      CSRF,
 						name:      'default',
 						filter:    $('#filter-paths').val(),
-						daily:     $('#daily').is(':checked'),
+						group:     $('#hl-group').val(),
 						period:    p,
 					},
 					success: () => {
@@ -478,7 +500,7 @@
 		let ctx     = canvas.getContext('2d', {alpha: false}),
 			max     = Math.max(10, parseInt(c.dataset.max, 10)),
 			scale   = get_current_scale(),
-			daily   = c.dataset.daily === 'true',
+			daily   = c.dataset.group === 'day',
 			isBar   = $(c).is('.chart-bar'),
 			isEvent = $(c).closest('tr').hasClass('event'),
 			isPages = $(c).closest('.count-list-pages').length > 0,
@@ -676,7 +698,7 @@
 					url:  BASE_PATH + '/load-widget',
 					data: append_period({
 						widget:    pages.attr('data-widget'),
-						daily:     $('#daily').is(':checked'),
+						group:     $('#hl-group').val(),
 						exclude:   pages.find('.count-list-pages >tbody >tr').toArray().map((e) => e.dataset.id).join(','),
 						max:       get_original_scale(),
 					}),

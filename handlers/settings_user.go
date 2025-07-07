@@ -26,7 +26,7 @@ func (h settings) userPref(verr *zvalidate.Validator) zhttp.HandlerFunc {
 			Timezones          []*tz.Zone
 			FewerNumbersLocked bool
 		}{newGlobals(w, r), verr, tz.Zones,
-			goatcounter.MustGetUser(r.Context()).Settings.FewerNumbersLockUntil.After(ztime.Now())})
+			goatcounter.MustGetUser(r.Context()).Settings.FewerNumbersLockUntil.After(ztime.Now(r.Context()))})
 	}
 }
 
@@ -49,13 +49,13 @@ func (h settings) userPrefSave(w http.ResponseWriter, r *http.Request) error {
 
 	args.User.Settings.Theme = args.Theme
 
-	if oldFewerNums && !args.User.Settings.FewerNumbers && args.User.Settings.FewerNumbersLockUntil.After(ztime.Now()) {
-		zhttp.FlashError(w, "Nice try")
+	if oldFewerNums && !args.User.Settings.FewerNumbers && args.User.Settings.FewerNumbersLockUntil.After(ztime.Now(r.Context())) {
+		zhttp.FlashError(w, r, "Nice try")
 		return zhttp.SeeOther(w, "/user/pref")
 	}
 
 	if args.FewerNumbersLock != "" {
-		args.User.Settings.FewerNumbersLockUntil = ztime.Time{ztime.Now()}.
+		args.User.Settings.FewerNumbersLockUntil = ztime.Time{ztime.Now(r.Context())}.
 			In(args.User.Settings.Timezone.Location).
 			AddPeriod(1, map[string]ztime.Period{"week": ztime.WeekMonday, "month": ztime.Month}[args.FewerNumbersLock]).
 			StartOf(ztime.Day).
@@ -67,7 +67,7 @@ func (h settings) userPrefSave(w http.ResponseWriter, r *http.Request) error {
 		reportingChanged = goatcounter.Config(r.Context()).GoatcounterCom && oldReports != args.User.Settings.EmailReports
 	)
 	if reportingChanged {
-		args.User.LastReportAt = ztime.Now()
+		args.User.LastReportAt = ztime.Now(r.Context())
 	}
 
 	err = zdb.TX(r.Context(), func(ctx context.Context) error {
@@ -94,7 +94,7 @@ func (h settings) userPrefSave(w http.ResponseWriter, r *http.Request) error {
 		sendEmailVerify(r.Context(), Site(r.Context()), &args.User, goatcounter.Config(r.Context()).EmailFrom)
 	}
 
-	zhttp.Flash(w, T(r.Context(), "notify/saved|Saved!"))
+	zhttp.Flash(w, r, T(r.Context(), "notify/saved|Saved!"))
 	return zhttp.SeeOther(w, "/user/pref")
 }
 
@@ -208,7 +208,7 @@ func (h settings) userDashboardSave(w http.ResponseWriter, r *http.Request) erro
 		if err != nil {
 			return err
 		}
-		zhttp.Flash(w, T(r.Context(), "notify/reset-to-default|Reset to defaults!"))
+		zhttp.Flash(w, r, T(r.Context(), "notify/reset-to-default|Reset to defaults!"))
 		return zhttp.SeeOther(w, "/user/dashboard")
 	}
 
@@ -252,7 +252,7 @@ func (h settings) userDashboardSave(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 
-	zhttp.Flash(w, "Saved!")
+	zhttp.Flash(w, r, "Saved!")
 	return zhttp.SeeOther(w, "/user/dashboard")
 }
 
@@ -265,10 +265,16 @@ func (h settings) userAuth(verr *zvalidate.Validator) zhttp.HandlerFunc {
 	}
 }
 
-func (h settings) userAPI(verr *zvalidate.Validator) zhttp.HandlerFunc {
+func (h settings) userAPI(verr *zvalidate.Validator, newToken goatcounter.APIToken) zhttp.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		var tokens goatcounter.APITokens
 		err := tokens.List(r.Context())
+		if err != nil {
+			return err
+		}
+
+		var sites goatcounter.Sites
+		err = sites.ForThisAccount(r.Context(), false)
 		if err != nil {
 			return err
 		}
@@ -277,9 +283,58 @@ func (h settings) userAPI(verr *zvalidate.Validator) zhttp.HandlerFunc {
 			Globals
 			Validate  *zvalidate.Validator
 			APITokens goatcounter.APITokens
-			Empty     goatcounter.APIToken
-		}{newGlobals(w, r), verr, tokens, goatcounter.APIToken{}})
+			Sites     goatcounter.Sites
+			NewToken  goatcounter.APIToken
+		}{newGlobals(w, r), verr, tokens, sites, newToken})
 	}
+}
+
+func (h settings) newAPIToken(w http.ResponseWriter, r *http.Request) error {
+	user := User(r.Context())
+	if !user.EmailVerified {
+		zhttp.Flash(w, r, T(r.Context(), "notify/need-email-verification-for-api|You need to verify your email before you can use the API."))
+		return zhttp.SeeOther(w, "/user/auth")
+	}
+
+	var token goatcounter.APIToken
+	_, err := zhttp.Decode(r, &token)
+	if err != nil {
+		return err
+	}
+
+	err = token.Insert(r.Context())
+	if err != nil {
+		var vErr *zvalidate.Validator
+		if errors.As(err, &vErr) {
+			return h.userAPI(vErr, token)(w, r)
+		}
+		return err
+	}
+
+	zhttp.Flash(w, r, T(r.Context(), "notify/api-token-created|API token created."))
+	return zhttp.SeeOther(w, "/user/api")
+}
+
+func (h settings) deleteAPIToken(w http.ResponseWriter, r *http.Request) error {
+	v := goatcounter.NewValidate(r.Context())
+	id := goatcounter.APITokenID(v.Integer32("id", chi.URLParam(r, "id")))
+	if v.HasErrors() {
+		return v
+	}
+
+	var token goatcounter.APIToken
+	err := token.ByID(r.Context(), id)
+	if err != nil {
+		return err
+	}
+
+	err = token.Delete(r.Context())
+	if err != nil {
+		return err
+	}
+
+	zhttp.Flash(w, r, T(r.Context(), "notify/api-token-removed|API token removed."))
+	return zhttp.SeeOther(w, "/user/api")
 }
 
 func (h settings) userViewSave(w http.ResponseWriter, r *http.Request) error {

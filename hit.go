@@ -2,7 +2,6 @@ package goatcounter
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -14,16 +13,18 @@ import (
 	"zgo.at/zstd/ztime"
 )
 
+type HitID int64
+
 type Hit struct {
-	ID         int64        `db:"hit_id" json:"-"`
-	Site       int64        `db:"site_id" json:"-"`
-	PathID     int64        `db:"path_id" json:"-"`
-	RefID      int64        `db:"ref_id" json:"-"`
-	SizeID     *int64       `db:"size_id" json:"-"`
-	BrowserID  int64        `db:"browser_id" json:"-"`
-	SystemID   int64        `db:"system_id" json:"-"`
-	CampaignID *int64       `db:"campaign" json:"-"`
+	ID         HitID        `db:"hit_id" json:"-"`
+	Site       SiteID       `db:"site_id" json:"-"`
+	PathID     PathID       `db:"path_id" json:"-"`
+	RefID      RefID        `db:"ref_id" json:"-"`
+	BrowserID  BrowserID    `db:"browser_id" json:"-"`
+	SystemID   SystemID     `db:"system_id" json:"-"`
+	CampaignID *CampaignID  `db:"campaign" json:"-"`
 	Session    zint.Uint128 `db:"session" json:"-"`
+	Width      *int16       `db:"width" json:"width"`
 
 	Path  string     `db:"-" json:"p,omitempty"`
 	Title string     `db:"-" json:"t,omitempty"`
@@ -31,7 +32,7 @@ type Hit struct {
 	Event zbool.Bool `db:"-" json:"e,omitempty"`
 	Size  Floats     `db:"-" json:"s,omitempty"`
 	Query string     `db:"-" json:"q,omitempty"`
-	Bot   int        `db:"bot" json:"b,omitempty"`
+	Bot   int        `db:"-" json:"b,omitempty"`
 
 	RefScheme       *string    `db:"ref_scheme" json:"-"`
 	UserAgentHeader string     `db:"-" json:"-"`
@@ -171,7 +172,7 @@ func (h *Hit) Defaults(ctx context.Context, initial bool) error {
 	h.Site = site.ID
 
 	if h.CreatedAt.IsZero() {
-		h.CreatedAt = ztime.Now()
+		h.CreatedAt = ztime.Now(ctx)
 	}
 
 	if h.Event {
@@ -251,41 +252,35 @@ func (h *Hit) Defaults(ctx context.Context, initial bool) error {
 		return nil
 	}
 
-	// Get or insert path.
-	path := Path{Path: h.Path, Title: h.Title, Event: h.Event}
-	err := path.GetOrInsert(ctx)
-	if err != nil {
-		return errors.Wrap(err, "Hit.Defaults")
-	}
-	h.PathID = path.ID
-
-	// Get or insert ref.
-	ref := Ref{Ref: h.Ref, RefScheme: h.RefScheme}
-	err = ref.GetOrInsert(ctx)
-	if err != nil {
-		return errors.Wrap(err, "Hit.Defaults")
-	}
-	h.RefID = ref.ID
-
-	// Get or insert size.
-	if site.Settings.Collect.Has(CollectScreenSize) {
-		var size Size
-		err = size.GetOrInsert(ctx, h.Size)
+	// Only find references for non-bots; filters out quite some junk from
+	// vulnerability scanners and whatnot
+	if h.Bot == 0 {
+		// Get or insert path.
+		path := Path{Path: h.Path, Title: h.Title, Event: h.Event}
+		err := path.GetOrInsert(ctx)
 		if err != nil {
 			return errors.Wrap(err, "Hit.Defaults")
 		}
-		h.SizeID = &size.ID
-	}
+		h.PathID = path.ID
 
-	// Get or insert browser and system.
-	if site.Settings.Collect.Has(CollectUserAgent) {
-		ua := UserAgent{UserAgent: h.UserAgentHeader}
-		err = ua.GetOrInsert(ctx)
+		// Get or insert ref.
+		ref := Ref{Ref: h.Ref, RefScheme: h.RefScheme}
+		err = ref.GetOrInsert(ctx)
 		if err != nil {
 			return errors.Wrap(err, "Hit.Defaults")
 		}
-		h.BrowserID = ua.BrowserID
-		h.SystemID = ua.SystemID
+		h.RefID = ref.ID
+
+		// Get or insert browser and system.
+		if site.Settings.Collect.Has(CollectUserAgent) {
+			ua := UserAgent{UserAgent: h.UserAgentHeader}
+			err = ua.GetOrInsert(ctx)
+			if err != nil {
+				return errors.Wrap(err, "Hit.Defaults")
+			}
+			h.BrowserID = ua.BrowserID
+			h.SystemID = ua.SystemID
+		}
 	}
 
 	return nil
@@ -302,7 +297,7 @@ func (h *Hit) Validate(ctx context.Context, initial bool) error {
 	v.Len("ref", h.Ref, 0, 2048)
 
 	// Small margin as client's clocks may not be 100% accurate.
-	if h.CreatedAt.After(ztime.Now().Add(5 * time.Second)) {
+	if h.CreatedAt.After(ztime.Now(ctx).Add(5 * time.Second)) {
 		v.Append("created_at", "in the future")
 	}
 
@@ -314,7 +309,7 @@ func (h *Hit) Validate(ctx context.Context, initial bool) error {
 		v.Len("path", h.Path, 1, 2048)
 		v.Len("title", h.Title, 0, 1024)
 		v.Len("user_agent_header", h.UserAgentHeader, 0, 512)
-	} else {
+	} else if h.Bot == 0 {
 		v.Required("path_id", h.PathID)
 
 		if MustGetSite(ctx).Settings.Collect.Has(CollectUserAgent) {
@@ -335,13 +330,12 @@ type Hits []Hit
 func (h *Hits) TestList(ctx context.Context, siteOnly bool) error {
 	var hh []struct {
 		Hit
-		B    int64      `db:"browser_id"`
-		S    int64      `db:"system_id"`
-		P    string     `db:"path"`
-		T    string     `db:"title"`
-		E    zbool.Bool `db:"event"`
-		R    string     `db:"ref"`
-		Size Floats     `db:"size"`
+		B BrowserID  `db:"browser_id"`
+		S SystemID   `db:"system_id"`
+		P string     `db:"path"`
+		T string     `db:"title"`
+		E zbool.Bool `db:"event"`
+		R string     `db:"ref"`
 	}
 
 	err := zdb.Select(ctx, &hh, `/* Hits.TestList */
@@ -352,12 +346,10 @@ func (h *Hits) TestList(ctx context.Context, siteOnly bool) error {
 			paths.path,
 			paths.title,
 			paths.event,
-			refs.ref,
-			sizes.size
+			refs.ref
 		from hits
 		join paths using (path_id)
 		left join refs  using (ref_id)
-		left join sizes using (size_id)
 		{{:site_only where hits.site_id = :site}}
 		order by hit_id asc`,
 		map[string]any{
@@ -375,23 +367,25 @@ func (h *Hits) TestList(ctx context.Context, siteOnly bool) error {
 		x.Hit.Title = x.T
 		x.Hit.Event = x.E
 		x.Hit.Ref = x.R
-		x.Hit.Size = x.Size
-
 		*h = append(*h, x.Hit)
 	}
 	return nil
 }
 
 // Purge the given paths.
-func (h *Hits) Purge(ctx context.Context, pathIDs []int64) error {
-	query := `/* Hits.Purge */
-		delete from %s where site_id=? and path_id in (?)`
+func (h *Hits) Purge(ctx context.Context, pathIDs []PathID) error {
 
 	return zdb.TX(ctx, func(ctx context.Context) error {
-		site := MustGetSite(ctx).ID
-
+		siteID := MustGetSite(ctx).ID
 		for _, t := range append(statTables, "hit_counts", "ref_counts", "hits", "paths") {
-			err := zdb.Exec(ctx, fmt.Sprintf(query, t), site, pathIDs)
+			err := zdb.Exec(ctx, `/* Hits.Purge */
+				delete from :tbl where site_id=:site_id and path_id :in (:paths)`,
+				map[string]any{
+					"tbl":     zdb.SQL(t),
+					"site_id": siteID,
+					"paths":   pgArray(ctx, pathIDs),
+					"in":      pgIn(ctx),
+				})
 			if err != nil {
 				return errors.Wrapf(err, "Hits.Purge %s", t)
 			}

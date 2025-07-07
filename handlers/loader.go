@@ -5,14 +5,29 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/errors"
+	"zgo.at/goatcounter/v2"
+	"zgo.at/goatcounter/v2/pkg/log"
+	"zgo.at/guru"
 	"zgo.at/json"
-	zcache2 "zgo.at/zcache/v2"
+	"zgo.at/zcache/v2"
 	"zgo.at/zstd/zint"
 )
+
+var (
+	supportWebsocket atomic.Bool
+	websocketFail    atomic.Int32
+)
+
+func init() { supportWebsocket.Store(true) }
+
+func useWebsocket(r *http.Request) bool {
+	return supportWebsocket.Load() && r.URL.Query().Get("no-websocket") == ""
+}
 
 // On dashboard view we generate a unique ID we send to the frontend, and
 // register a new loader:
@@ -32,11 +47,11 @@ import (
 // we can't use just the connection itself as an ID. We also can't use the
 // userID because a user can have two tabs open. So, we need a connection ID.
 type loaderT struct {
-	conns *zcache2.Cache[zint.Uint128, *loaderClient]
+	conns *zcache.Cache[zint.Uint128, *loaderClient]
 }
 
 var loader = loaderT{
-	conns: zcache2.New[zint.Uint128, *loaderClient](zcache2.DefaultExpiration, zcache2.NoExpiration),
+	conns: zcache.New[zint.Uint128, *loaderClient](zcache.DefaultExpiration, zcache.NoExpiration),
 }
 
 type loaderClient struct {
@@ -123,10 +138,11 @@ func (l *loaderT) sendJSON(r *http.Request, id zint.Uint128, data any) {
 	}
 }
 
-func (h backend) loader(w http.ResponseWriter, r *http.Request) error {
+func (h *backend) loader(w http.ResponseWriter, r *http.Request) error {
 	ids := r.URL.Query().Get("id")
 	if ids == "" {
-		return fmt.Errorf("no id parameter")
+		w.Header().Set("Content-Type", "text/plain")
+		return guru.New(400, "no id parameter")
 	}
 	id, err := zint.ParseUint128(ids, 16)
 	if err != nil {
@@ -141,23 +157,22 @@ func (h backend) loader(w http.ResponseWriter, r *http.Request) error {
 	}
 	c, err := u.Upgrade(w, r, nil)
 	if err != nil {
+		if !goatcounter.Config(r.Context()).GoatcounterCom && r.Header.Get("Sec-Websocket-Version") != "" {
+			nfail := websocketFail.Add(1)
+			if nfail >= 2 {
+				log.Warn(r.Context(),
+					"Disabling WebSocket support as they do not appear correctly proxied.\n"+
+						"It's recommended to proxy WebSockets as it will improve performance")
+				supportWebsocket.Store(false)
+			}
+		}
+		if errors.As(err, &websocket.HandshakeError{}) {
+			return guru.WithCode(400, err)
+		}
 		return err
 	}
 
+	websocketFail.Store(0)
 	loader.connect(r, id, c)
-
-	// Read messages.
-	go func() {
-		defer log.Recover(r.Context())
-		for {
-			t, m, err := c.ReadMessage()
-			if err != nil {
-				break
-			}
-			fmt.Println("websocket msg:", t, string(m))
-		}
-		c.Close()
-	}()
-
 	return nil
 }

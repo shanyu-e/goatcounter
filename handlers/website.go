@@ -14,11 +14,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"zgo.at/bgrun"
 	"zgo.at/blackmail"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/guru"
 	"zgo.at/tz"
 	"zgo.at/zdb"
@@ -194,7 +194,7 @@ func (h website) contact(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	zhttp.Flash(w, "Message sent!")
+	zhttp.Flash(w, r, "Message sent!")
 	return zhttp.SeeOther(w, args.Return)
 }
 
@@ -374,7 +374,7 @@ func (h website) doSignup(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		log.Errorf(r.Context(), "login during account creation: %s", err)
 	} else {
-		auth.SetCookie(w, *user.LoginToken, cookieDomain(&site, r))
+		auth.SetCookie(w, r, *user.LoginToken, cookieDomain(&site, r))
 	}
 
 	ctx := goatcounter.CopyContextValues(r.Context())
@@ -464,7 +464,7 @@ func (h website) doForgot(w http.ResponseWriter, r *http.Request) error {
 		}
 	})
 
-	zhttp.Flash(w, fmt.Sprintf("List of login URLs mailed to %s", args.Email))
+	zhttp.Flash(w, r, fmt.Sprintf("List of login URLs mailed to %s", args.Email))
 	return zhttp.SeeOther(w, "/user/forgot")
 }
 

@@ -10,7 +10,7 @@ import (
 	"zgo.at/blackmail"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/zdb"
 	"zgo.at/zstd/zstring"
 	"zgo.at/zstd/ztime"
@@ -27,7 +27,7 @@ func emailReports(ctx context.Context) error {
 		return errors.Errorf("cron.emailReports: %w", err)
 	}
 
-	now := ztime.Now().UTC()
+	now := ztime.Now(ctx).UTC()
 	for _, user := range users {
 		var site goatcounter.Site
 		err := site.ByID(ctx, user.Site)
@@ -68,7 +68,7 @@ func emailReports(ctx context.Context) error {
 			continue
 		}
 
-		err = zdb.Exec(ctx, `update users set last_report_at=$1 where user_id=$2`, ztime.Now(), user.ID)
+		err = zdb.Exec(ctx, `update users set last_report_at=$1 where user_id=$2`, ztime.Now(ctx), user.ID)
 		if err != nil {
 			el.Error(ctx, err)
 		}
@@ -128,7 +128,7 @@ func reportText(ctx context.Context, site goatcounter.Site, user goatcounter.Use
 	subject = fmt.Sprintf("Your GoatCounter report for %s", args.DisplayDate)
 
 	{ // Get overview of paths.
-		_, _, err := args.Pages.List(ctx, rng, nil, nil, 10, true)
+		_, _, err := args.Pages.List(ctx, rng, nil, nil, 10, goatcounter.GroupDaily)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -137,7 +137,7 @@ func reportText(ctx context.Context, site goatcounter.Site, user goatcounter.Use
 			return nil, nil, "", nil
 		}
 
-		_, err = args.Total.Totals(ctx, rng, nil, true, true)
+		_, err = args.Total.Totals(ctx, rng, nil, goatcounter.GroupDaily, true)
 		if err != nil {
 			return nil, nil, "", err
 		}

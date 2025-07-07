@@ -1,5 +1,5 @@
 {{/* TODO: make option to split counts between events and regular pageviews */}}
-<div class="pages-list {{if .Daily}}pages-list-daily{{end}}" data-widget="{{.ID}}">
+<div class="pages-list {{if .Group.Daily}}pages-list-daily{{end}}" data-widget="{{.ID}}">
 	<div class="widget-header">
 		<h2 class="full-width">{{t .Context "dashboard/pages/header|Pages"}}
 		{{if not $.User.Settings.FewerNumbers}}
@@ -14,7 +14,7 @@
 	</div>
 
 	{{if .Err}}
-		<em>{{t .Context "p/error|Error: %(error-message)" .Err}}</em>
+		<em>{{t .Context "p/error|Error: %(error-message)" .Err.Error}}</em>
 	{{else}}
 		<table class="count-list count-list-pages" data-max="{{.Max}}" data-scale="{{.Max}}">
 			<tbody class="pages">{{template "_dashboard_pages_rows.gohtml" .}}</tbody>

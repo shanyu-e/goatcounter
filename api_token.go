@@ -2,10 +2,13 @@ package goatcounter
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	"zgo.at/errors"
+	"zgo.at/guru"
+	"zgo.at/z18n"
 	"zgo.at/zdb"
 	"zgo.at/zstd/zcrypto"
 	"zgo.at/zstd/zint"
@@ -26,14 +29,17 @@ const (
 	APIPermStats                     // 64
 )
 
+type APITokenID int32
+
 type APIToken struct {
-	ID     int64 `db:"api_token_id" json:"-"`
-	SiteID int64 `db:"site_id" json:"-"`
-	UserID int64 `db:"user_id" json:"-"`
+	ID     APITokenID `db:"api_token_id" json:"-"`
+	SiteID SiteID     `db:"site_id" json:"-"`
+	UserID UserID     `db:"user_id" json:"-"`
 
 	Name        string         `db:"name" json:"name"`
 	Token       string         `db:"token" json:"-"`
 	Permissions zint.Bitflag64 `db:"permissions" json:"permissions"`
+	Sites       SiteIDs        `db:"sites" json:"sites"`
 
 	CreatedAt  time.Time  `db:"created_at" json:"-"`
 	LastUsedAt *time.Time `db:"last_used_at" json:"-"`
@@ -121,9 +127,9 @@ func (t APIToken) FormatPermissions() string {
 
 // Defaults sets fields to default values, unless they're already set.
 func (t *APIToken) Defaults(ctx context.Context) {
-	t.SiteID = MustGetSite(ctx).ID
+	t.SiteID = MustGetSite(ctx).IDOrParent()
 	t.Token = zcrypto.Secret256()
-	t.CreatedAt = ztime.Now()
+	t.CreatedAt = ztime.Now(ctx)
 }
 
 func (t *APIToken) Validate(ctx context.Context) error {
@@ -133,7 +139,23 @@ func (t *APIToken) Validate(ctx context.Context) error {
 	v.Required("user_id", t.SiteID)
 	v.Required("token", t.Token)
 	if t.Permissions == 1 {
-		v.Append("permissions", "must set at least one permission")
+		v.Append("permissions", z18n.T(ctx, "validate/need-one|must select at least one"))
+	}
+	if len(t.Sites) == 0 {
+		v.Append("sites", z18n.T(ctx, "validate/need-one|must select at least one"))
+	}
+	account := MustGetAccount(ctx)
+	if !t.Sites.All() {
+		for _, id := range t.Sites {
+			var s Site
+			err := s.ByID(ctx, id)
+			if err != nil {
+				return err
+			}
+			if s.IDOrParent() != account.ID {
+				return fmt.Errorf("site %d doesn't not belong to current account %d", s.IDOrParent(), account.ID)
+			}
+		}
 	}
 	return v.ErrorOrNil()
 }
@@ -150,9 +172,9 @@ func (t *APIToken) Insert(ctx context.Context) error {
 		return err
 	}
 
-	t.ID, err = zdb.InsertID(ctx, "api_token_id",
-		`insert into api_tokens (site_id, user_id, name, token, permissions, created_at) values (?)`,
-		[]any{t.SiteID, GetUser(ctx).ID, t.Name, t.Token, t.Permissions, t.CreatedAt})
+	t.ID, err = zdb.InsertID[APITokenID](ctx, "api_token_id",
+		`insert into api_tokens (site_id, user_id, name, token, permissions, created_at, sites) values (?)`,
+		[]any{t.SiteID, GetUser(ctx).ID, t.Name, t.Token, t.Permissions, t.CreatedAt, t.Sites})
 	return errors.Wrap(err, "APIToken.Insert")
 }
 
@@ -185,37 +207,46 @@ func (t *APIToken) UpdateLastUsed(ctx context.Context) error {
 		return err
 	}
 
-	t.LastUsedAt = ztype.Ptr(ztime.Now())
+	t.LastUsedAt = ztype.Ptr(ztime.Now(ctx))
 	err = zdb.Exec(ctx, `update api_tokens set last_used_at=? where api_token_id=?`,
 		t.LastUsedAt, t.ID)
 	return errors.Wrap(err, "APIToken.UpdateLastUsed")
 }
 
-func (t *APIToken) ByID(ctx context.Context, id int64) error {
-	return errors.Wrapf(zdb.Get(ctx, t, `/* APIToken.ByID */
+func (t *APIToken) ByID(ctx context.Context, id APITokenID) error {
+	err := zdb.Get(ctx, t, `/* APIToken.ByID */
 		select * from api_tokens where api_token_id=$1 and site_id=$2`,
-		id, MustGetSite(ctx).ID), "APIToken.ByID %d", id)
+		id, MustGetSite(ctx).IDOrParent())
+	return errors.Wrapf(err, "APIToken.ByID(%d)", id)
 }
 
 func (t *APIToken) ByToken(ctx context.Context, token string) error {
-	return errors.Wrap(zdb.Get(ctx, t,
+	err := zdb.Get(ctx, t,
 		`/* APIToken.ByID */ select * from api_tokens where token=$1 and site_id=$2`,
-		token, MustGetSite(ctx).ID), "APIToken.ByToken")
+		token, MustGetSite(ctx).IDOrParent())
+	if err != nil {
+		return errors.Wrapf(err, "APIToken.ByToken(%q)", token)
+	}
+	if !t.Sites.Has(MustGetSite(ctx).ID) {
+		return guru.New(403, "this token does not have access to this site")
+	}
+	return nil
 }
 
 func (t *APIToken) Delete(ctx context.Context) error {
 	err := zdb.Exec(ctx,
 		`/* APIToken.Delete */ delete from api_tokens where api_token_id=$1 and site_id=$2`,
-		t.ID, MustGetSite(ctx).ID)
-	return errors.Wrapf(err, "APIToken.Delete %d", t.ID)
+		t.ID, MustGetSite(ctx).IDOrParent())
+	return errors.Wrapf(err, "APIToken.Delete(%d)", t.ID)
 }
 
 type APITokens []APIToken
 
 func (t *APITokens) List(ctx context.Context) error {
-	return errors.Wrap(zdb.Select(ctx, t,
+	err := zdb.Select(ctx, t,
 		`select * from api_tokens where site_id=$1 and user_id=$2`,
-		MustGetSite(ctx).ID, GetUser(ctx).ID), "APITokens.List")
+		MustGetSite(ctx).IDOrParent(), GetUser(ctx).ID)
+	return errors.Wrap(err, "APITokens.List")
 }
 
 // Find API tokens: by ID if ident is a number, or by token if it's not.
@@ -230,10 +261,10 @@ func (t *APITokens) Find(ctx context.Context, ident []string) error {
 }
 
 // IDs gets a list of all IDs for these API tokens.
-func (t *APITokens) IDs() []int64 {
-	ids := make([]int64, 0, len(*t))
+func (t *APITokens) IDs() []int32 {
+	ids := make([]int32, 0, len(*t))
 	for _, tt := range *t {
-		ids = append(ids, tt.ID)
+		ids = append(ids, int32(tt.ID))
 	}
 	return ids
 }

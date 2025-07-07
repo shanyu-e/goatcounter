@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 
 	"golang.org/x/text/language"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/guru"
 	"zgo.at/z18n"
 	"zgo.at/zdb"
@@ -18,6 +17,7 @@ import (
 	"zgo.at/zli"
 	"zgo.at/zstd/zcrypto"
 	"zgo.at/zstd/zint"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/zstring"
 	"zgo.at/zstd/ztype"
 	"zgo.at/zvalidate"
@@ -347,7 +347,7 @@ Use "goatcounter help db" for the full documentation.`
 type (
 	findMany interface {
 		Find(context.Context, []string) error
-		IDs() []int64
+		IDs() []int32
 		Delete(context.Context, bool) error
 	}
 	stringFlag interface {
@@ -600,7 +600,7 @@ func dbParseFlag(f zli.Flags, dbConnect *string, debug []string, createdb *bool)
 		return nil, nil, err
 	}
 
-	ctx := goatcounter.NewContext(db)
+	ctx := goatcounter.NewContext(context.Background(), db)
 	ctx = z18n.With(ctx, z18n.NewBundle(language.English).Locale("en"))
 	return db, ctx, nil
 }
@@ -656,7 +656,6 @@ func cmdDBDelete(f zli.Flags, cmd string, dbConnect *string, debug []string, cre
 	if err != nil {
 		return err
 	}
-
 	return finder.Delete(ctx, *force)
 }
 
@@ -972,8 +971,8 @@ func cmdDBAPITokenCreate(ctx context.Context,
 		return v
 	}
 
-	var siteID int64
-	findUserID, _ := strconv.ParseInt(findUser, 10, 64)
+	var siteID goatcounter.SiteID
+	findUserID, _ := zstrconv.ParseInt[goatcounter.UserID](findUser, 10)
 	err := zdb.Get(ctx, &siteID,
 		`select site_id from users where user_id = $1 or email = $2`,
 		findUserID, findUser)
@@ -999,6 +998,7 @@ func cmdDBAPITokenCreate(ctx context.Context,
 		UserID:      user.ID,
 		Name:        name,
 		Permissions: perm,
+		Sites:       goatcounter.SiteIDs{siteID},
 	}).Insert(ctx)
 }
 

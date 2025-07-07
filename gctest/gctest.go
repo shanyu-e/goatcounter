@@ -12,6 +12,7 @@ import (
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/cron"
 	"zgo.at/goatcounter/v2/db/migrate/gomig"
+	"zgo.at/goatcounter/v2/pkg/geo"
 	"zgo.at/z18n"
 	"zgo.at/zdb"
 	"zgo.at/zdb/drivers/go-sqlite3"
@@ -24,13 +25,27 @@ var pgSQL = false
 
 func init() {
 	sqlite3.DefaultHook(goatcounter.SQLiteHook)
-	goatcounter.InitGeoDB("")
+
+	set := func(k, v string) {
+		if _, ok := os.LookupEnv(k); !ok {
+			os.Setenv(k, v)
+		}
+	}
+	set("PGHOST", "localhost")
+	set("PGPORT", "5432")
+	set("PGDATABASE", "goatcounter")
+	set("PGUSER", "goatcounter")
+	set("PGPASSWORD", "goatcounter")
+	set("PGSSLMODE", "disable")
 }
 
 // Context creates a new test context.
 func Context(db zdb.DB) context.Context {
-	ctx := goatcounter.NewContext(db)
+	ctx := goatcounter.NewContext(context.Background(), db)
 	ctx = z18n.With(ctx, z18n.NewBundle(language.BritishEnglish).Locale("en-GB"))
+	geodb, _ := geo.Open("")
+	ctx = geo.With(ctx, geodb)
+
 	goatcounter.Config(ctx).BcryptMinCost = true
 	goatcounter.Config(ctx).GoatcounterCom = true
 	goatcounter.Config(ctx).Domain = "test"
@@ -149,7 +164,7 @@ func initData(ctx context.Context, db zdb.DB, t testing.TB) context.Context {
 func StoreHits(ctx context.Context, t *testing.T, wantFail bool, hits ...goatcounter.Hit) []goatcounter.Hit {
 	t.Helper()
 
-	siteID := int64(1)
+	siteID := goatcounter.SiteID(1)
 	if s := goatcounter.GetSite(ctx); s != nil {
 		siteID = s.ID
 	}
@@ -174,7 +189,7 @@ func StoreHits(ctx context.Context, t *testing.T, wantFail bool, hits ...goatcou
 		t.Fatal("gc.StoreHits: no error while wantError is true")
 	}
 
-	sites := make(map[int64]struct{})
+	sites := make(map[goatcounter.SiteID]struct{})
 	for _, h := range hits {
 		sites[h.Site] = struct{}{}
 	}

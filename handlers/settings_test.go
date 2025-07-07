@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"zgo.at/bgrun"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/gctest"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
 	"zgo.at/zdb"
 	"zgo.at/zstd/ztest"
 	"zgo.at/zstd/ztime"
@@ -37,10 +37,9 @@ func TestSettingsTpl(t *testing.T) {
 
 		{
 			setup: func(ctx context.Context, t *testing.T) {
-				one := int64(1)
 				ss := goatcounter.Site{
 					Code:   "subsite",
-					Parent: &one,
+					Parent: ztype.Ptr(goatcounter.SiteID(1)),
 				}
 				err := ss.Insert(ctx)
 				if err != nil {
@@ -120,7 +119,7 @@ func TestSettingsSitesAdd(t *testing.T) {
 			name: "already exists for this account",
 			setup: func(ctx context.Context, t *testing.T) {
 				s := goatcounter.Site{
-					Parent: ztype.Ptr(int64(1)),
+					Parent: ztype.Ptr(goatcounter.SiteID(1)),
 					Cname:  ztype.Ptr("add.example.com"),
 					Code:   "add",
 				}
@@ -169,7 +168,7 @@ func TestSettingsSitesAdd(t *testing.T) {
 			name: "undelete",
 			setup: func(ctx context.Context, t *testing.T) {
 				s := goatcounter.Site{
-					Parent: ztype.Ptr(int64(1)),
+					Parent: ztype.Ptr(goatcounter.SiteID(1)),
 					Cname:  ztype.Ptr("add.example.com"),
 					Code:   "add",
 				}
@@ -241,7 +240,7 @@ func TestSettingsSitesRemove(t *testing.T) {
 			name: "remove",
 			setup: func(ctx context.Context, t *testing.T) {
 				err := (&goatcounter.Site{
-					Parent: ztype.Ptr(int64(1)),
+					Parent: ztype.Ptr(goatcounter.SiteID(1)),
 					Cname:  ztype.Ptr("add.example.com"),
 					Code:   "add",
 				}).Insert(ctx)
@@ -327,7 +326,8 @@ func TestSettingsMerge(t *testing.T) {
 			`select * from hit_counts    order by path_id`,
 			`select * from hit_stats     order by path_id`,
 			`select * from browser_stats order by path_id`,
-			`select * from system_stats  join systems using(system_id) order by path_id`,
+			`select site_id, path_id, system_id, day, count, name, version from system_stats
+				join systems using(system_id) order by path_id`,
 		} {
 			zdb.Dump(ctx, have, q)
 		}

@@ -2,18 +2,20 @@ package goatcounter
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
 	"zgo.at/errors"
 	"zgo.at/guru"
+	"zgo.at/json"
 	"zgo.at/zdb"
 	"zgo.at/zstd/zcrypto"
 	"zgo.at/zstd/znet"
 	"zgo.at/zstd/zslice"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/zstring"
 	"zgo.at/zstd/ztime"
 )
@@ -29,9 +31,65 @@ var reserved = []string{
 var statTables = []string{"hit_stats", "system_stats", "browser_stats",
 	"location_stats", "language_stats", "size_stats"}
 
+type (
+	SiteID  int32
+	SiteIDs []SiteID
+)
+
+// func (s SiteIDs) MarshalText() ([]byte, error) { return json.Marshal(s) }
+func (s *SiteIDs) UnmarshalText(v []byte) error {
+	n, err := zstrconv.ParseInt[SiteID](string(v), 10)
+	if err != nil {
+		return err
+	}
+	*s = append(*s, n)
+	return nil
+}
+func (s SiteIDs) Value() (driver.Value, error) { return json.Marshal(s) }
+func (s *SiteIDs) Scan(v any) error {
+	var (
+		x   []SiteID
+		err error
+	)
+	switch vv := v.(type) {
+	case []byte:
+		err = json.Unmarshal(vv, &x)
+	case string:
+		err = json.Unmarshal([]byte(vv), &x)
+	default:
+		return errors.Errorf("JSON.Scan: unsupported type: %T", v)
+	}
+	*s = x
+	return err
+}
+func (s SiteIDs) All() bool {
+	return len(s) == 1 && s[0] == -1
+}
+func (s SiteIDs) Has(siteID SiteID) bool {
+	if s.All() {
+		return true
+	}
+	for _, ss := range s {
+		if ss == siteID {
+			return true
+		}
+	}
+	return false
+}
+func (s SiteIDs) List(ctx context.Context) Sites {
+	var sites Sites
+	_ = zdb.Select(ctx, &sites,
+		`select * from sites where site_id in (:sites) and (site_id=:site_id or parent=:site_id)`,
+		map[string]any{
+			"sites":   []SiteID(s),
+			"site_id": MustGetAccount(ctx).ID,
+		})
+	return sites
+}
+
 type Site struct {
-	ID     int64  `db:"site_id" json:"id,readonly"`
-	Parent *int64 `db:"parent" json:"parent,readonly"`
+	ID     SiteID  `db:"site_id" json:"id,readonly"`
+	Parent *SiteID `db:"parent" json:"parent,readonly"`
 
 	// Custom domain, e.g. "stats.example.com".
 	//
@@ -65,14 +123,14 @@ type Site struct {
 	FirstHitAt time.Time  `db:"first_hit_at" json:"first_hit_at"`
 }
 
-// ClearCache clears the  cache for this site.
+// ClearCache clears the cache for this site.
 func (s Site) ClearCache(ctx context.Context, full bool) {
-	cacheSites(ctx).Delete(strconv.FormatInt(s.ID, 10))
+	cacheSites(ctx).Delete(s.ID)
 
 	// TODO: be more selective about this.
 	if full {
-		cachePaths(ctx).Flush()
-		cacheChangedTitles(ctx).Flush()
+		cachePaths(ctx).Reset()
+		cacheChangedTitles(ctx).Reset()
 	}
 }
 
@@ -82,7 +140,7 @@ func (s *Site) Defaults(ctx context.Context) {
 		s.State = StateActive
 	}
 
-	n := ztime.Now()
+	n := ztime.Now(ctx)
 
 	if !Config(ctx).GoatcounterCom {
 		s.Code = "serve-" + zcrypto.Secret64()
@@ -184,7 +242,7 @@ func (s *Site) Insert(ctx context.Context) error {
 		return err
 	}
 
-	s.ID, err = zdb.InsertID(ctx, "site_id", `insert into sites (
+	s.ID, err = zdb.InsertID[SiteID](ctx, "site_id", `insert into sites (
 		parent, code, cname, link_domain, settings, user_defaults, created_at, first_hit_at, cname_setup_at) values (?)`,
 		[]any{s.Parent, s.Code, s.Cname, s.LinkDomain, s.Settings, s.UserDefaults, s.CreatedAt, s.CreatedAt, s.CnameSetupAt})
 	if err != nil && zdb.ErrUnique(err) {
@@ -215,7 +273,7 @@ func (s *Site) Update(ctx context.Context) error {
 	return nil
 }
 
-func (s *Site) UpdateParent(ctx context.Context, newParent *int64) error {
+func (s *Site) UpdateParent(ctx context.Context, newParent *SiteID) error {
 	if s.ID == 0 {
 		return errors.New("ID == 0")
 	}
@@ -277,8 +335,8 @@ func (s *Site) UpdateCode(ctx context.Context, code string) error {
 		return errors.Wrap(err, "Site.UpdateCode")
 	}
 
-	cacheSites(ctx).Delete(strconv.FormatInt(s.ID, 10))
-	cacheSitesHost(ctx).Flush()
+	cacheSites(ctx).Delete(s.ID)
+	cacheSitesHost(ctx).Reset()
 	return nil
 }
 
@@ -306,7 +364,7 @@ func (s *Site) UpdateCnameSetupAt(ctx context.Context) error {
 		return errors.New("ID == 0")
 	}
 
-	n := ztime.Now()
+	n := ztime.Now(ctx)
 	s.CnameSetupAt = &n
 
 	err := zdb.Exec(ctx,
@@ -351,7 +409,7 @@ func (s *Site) Delete(ctx context.Context, deleteChildren bool) error {
 
 			// Just clear the entire sites cache; this operation is rare enough
 			// that it doesn't really matter.
-			cacheSites(ctx).Flush()
+			cacheSites(ctx).Reset()
 		}
 
 		// Update the site code so people can delete a site and then immediately
@@ -360,7 +418,7 @@ func (s *Site) Delete(ctx context.Context, deleteChildren bool) error {
 		if zdb.SQLDialect(ctx) == zdb.DialectPostgreSQL {
 			q = `update sites set state=$1, updated_at=$2, code=gen_random_uuid(), cname=null where site_id=$3 or parent=$3`
 		}
-		t := ztime.Now()
+		t := ztime.Now(ctx)
 		err := zdb.Exec(ctx, q, StateDeleted, t, s.ID)
 		if err != nil {
 			return errors.Wrap(err, "Site.Delete")
@@ -375,7 +433,7 @@ func (s *Site) Delete(ctx context.Context, deleteChildren bool) error {
 	})
 }
 
-func (s Site) Undelete(ctx context.Context, id int64) error {
+func (s Site) Undelete(ctx context.Context, id SiteID) error {
 	s.State = StateActive
 	s.ID = id
 	err := zdb.Exec(ctx, `update sites set state = ? where site_id = ?`, StateActive, id)
@@ -389,9 +447,9 @@ func (s Site) Undelete(ctx context.Context, id int64) error {
 
 // Exists checks if this site already exists, based on either the Cname or Code
 // field.
-func (s Site) Exists(ctx context.Context) (int64, error) {
+func (s Site) Exists(ctx context.Context) (SiteID, error) {
 	var (
-		id     int64
+		id     SiteID
 		query  = `select site_id from sites where lower(code) = lower($1) and site_id != $2 limit 1`
 		params = []any{s.Code, s.ID}
 	)
@@ -408,7 +466,7 @@ func (s Site) Exists(ctx context.Context) (int64, error) {
 }
 
 // ByID gets a site by ID.
-func (s *Site) ByID(ctx context.Context, id int64) error {
+func (s *Site) ByID(ctx context.Context, id SiteID) error {
 	err := s.ByIDState(ctx, id, StateActive)
 	if err != nil {
 		return fmt.Errorf("Site.ByID: %w", errors.Unwrap(err))
@@ -417,11 +475,10 @@ func (s *Site) ByID(ctx context.Context, id int64) error {
 }
 
 // ByIDState gets a site by ID and state. This may return deleted sites.
-func (s *Site) ByIDState(ctx context.Context, id int64, state string) error {
-	k := strconv.FormatInt(id, 10)
-	ss, ok := cacheSites(ctx).Get(k)
+func (s *Site) ByIDState(ctx context.Context, id SiteID, state string) error {
+	ss, ok := cacheSites(ctx).Get(id)
 	if ok {
-		*s = *ss.(*Site)
+		*s = *ss
 		return nil
 	}
 
@@ -431,7 +488,7 @@ func (s *Site) ByIDState(ctx context.Context, id int64, state string) error {
 	if err != nil {
 		return errors.Wrapf(err, "Site.ByIDState %d", id)
 	}
-	cacheSites(ctx).SetDefault(k, s)
+	cacheSites(ctx).Set(id, s)
 	return nil
 }
 
@@ -446,7 +503,7 @@ func (s *Site) ByCode(ctx context.Context, code string) error {
 func (s *Site) ByHost(ctx context.Context, host string) error {
 	ss, ok := cacheSitesHost(ctx).Get(host)
 	if ok {
-		*s = *ss.(*Site)
+		*s = *ss
 		return nil
 	}
 
@@ -458,7 +515,7 @@ func (s *Site) ByHost(ctx context.Context, host string) error {
 		if err != nil {
 			return errors.Wrap(err, "site.ByHost: from custom domain")
 		}
-		cacheSitesHost(ctx).Set(strconv.FormatInt(s.ID, 10), host, s)
+		cacheSitesHost(ctx).Set(s.ID, host, s)
 		return nil
 	}
 
@@ -474,13 +531,13 @@ func (s *Site) ByHost(ctx context.Context, host string) error {
 	if err != nil {
 		return errors.Wrap(err, "site.ByHost: from code")
 	}
-	cacheSitesHost(ctx).Set(strconv.FormatInt(s.ID, 10), host, s)
+	cacheSitesHost(ctx).Set(s.ID, host, s)
 	return nil
 }
 
 // Find a site: by ID if ident is a number, or by host if it's not.
 func (s *Site) Find(ctx context.Context, ident string) error {
-	id, err := strconv.ParseInt(ident, 10, 64)
+	id, err := zstrconv.ParseInt[SiteID](ident, 10)
 	if err == nil {
 		return errors.Wrap(s.ByID(ctx, id), "Site.Find")
 	}
@@ -554,7 +611,7 @@ func (s Site) LinkDomainURL(withProto bool, paths ...string) string {
 }
 
 // IDOrParent gets this site's ID or the parent ID if that's set.
-func (s Site) IDOrParent() int64 {
+func (s Site) IDOrParent() SiteID {
 	if s.Parent != nil {
 		return *s.Parent
 	}
@@ -585,7 +642,7 @@ func (s Site) DeleteOlderThan(ctx context.Context, days int) error {
 	return zdb.TX(ctx, func(ctx context.Context) error {
 		ival := Interval(ctx, days)
 
-		var pathIDs []int64
+		var pathIDs []SiteID
 		err := zdb.Select(ctx, &pathIDs, `/* Site.DeleteOlderThan */
 			select path_id from hit_counts where site_id=$1 and hour < `+ival+` group by path_id`, s.ID)
 		if err != nil {
@@ -599,32 +656,45 @@ func (s Site) DeleteOlderThan(ctx context.Context, days int) error {
 			}
 		}
 
-		err = zdb.Exec(ctx, `delete from hit_counts where site_id=$1 and hour < `+ival, s.ID)
+		err = zdb.Exec(ctx, `/* Site.DeleteOlderThan */
+			delete from hit_counts where site_id=$1 and hour < `+ival, s.ID)
 		if err != nil {
 			return errors.Wrap(err, "Site.DeleteOlderThan: delete hit_counts")
 		}
-		err = zdb.Exec(ctx, `delete from ref_counts where site_id=$1 and hour < `+ival, s.ID)
+		err = zdb.Exec(ctx, `/* Site.DeleteOlderThan */
+			delete from ref_counts where site_id=$1 and hour < `+ival, s.ID)
 		if err != nil {
 			return errors.Wrap(err, "Site.DeleteOlderThan: delete ref_counts")
 		}
 
-		err = zdb.Exec(ctx, `delete from hits where site_id=$1 and created_at < `+ival, s.ID)
+		err = zdb.Exec(ctx, `/* Site.DeleteOlderThan */
+			delete from hits where site_id=$1 and created_at < `+ival, s.ID)
 		if err != nil {
 			return errors.Wrap(err, "Site.DeleteOlderThan: delete hits")
 		}
 
 		if len(pathIDs) > 0 {
-			var remainPath []int64
+			var remainPath []SiteID
 			err := zdb.Select(ctx, &remainPath, `/* Site.DeleteOlderThan */
-				select path_id from hit_counts where site_id=? and path_id in (?)`,
-				s.ID, pathIDs)
+				select path_id from hit_counts where site_id=:site_id and path_id :in (:paths)`,
+				map[string]any{
+					"site_id": s.ID,
+					"paths":   pgArray(ctx, pathIDs),
+					"in":      pgIn(ctx),
+				})
 			if err != nil {
 				return errors.Wrap(err, "Site.DeleteOlderThan")
 			}
 
 			diff := zslice.Difference(pathIDs, remainPath)
 			if len(diff) > 0 {
-				err = zdb.Exec(ctx, `delete from paths where site_id=? and path_id in (?)`, s.ID, diff)
+				err = zdb.Exec(ctx, `/* Site.DeleteOlderThan */
+					delete from paths where site_id=:site_id and path_id :in (:paths)`,
+					map[string]any{
+						"site_id": s.ID,
+						"paths":   pgArray(ctx, diff),
+						"in":      pgIn(ctx),
+					})
 				if err != nil {
 					return errors.Wrap(err, "Site.DeleteOlderThan")
 				}
@@ -661,7 +731,7 @@ func (s *Sites) ListSubs(ctx context.Context) error {
 }
 
 // ForAccount gets all sites associated with an account.
-func (s *Sites) ForAccount(ctx context.Context, accountID int64) error {
+func (s *Sites) ForAccount(ctx context.Context, accountID SiteID) error {
 	err := zdb.Select(ctx, s, `/* Sites.ForThisAccount */
 		select * from sites
 		where state=$1 and (parent=$2 or site_id=$2) or (
@@ -721,10 +791,10 @@ func (s *Sites) Find(ctx context.Context, ident []string) error {
 }
 
 // IDs gets a list of all IDs for these sites.
-func (s *Sites) IDs() []int64 {
-	ids := make([]int64, 0, len(*s))
+func (s *Sites) IDs() []int32 {
+	ids := make([]int32, 0, len(*s))
 	for _, ss := range *s {
-		ids = append(ids, ss.ID)
+		ids = append(ids, int32(ss.ID))
 	}
 	return ids
 }
@@ -741,16 +811,4 @@ func (s *Sites) Delete(ctx context.Context, deleteChildren bool) error {
 		return nil
 	})
 	return errors.Wrap(err, "Sites.Delete")
-}
-
-// ListIDs lists all sites with the given IDs.
-func (s *Sites) ListIDs(ctx context.Context, ids ...int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-
-	err := zdb.Select(ctx, s,
-		`select * from sites where state=? and site_id in (?) order by created_at desc`,
-		StateActive, ids)
-	return errors.Wrap(err, "Sites.ListIDs")
 }

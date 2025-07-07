@@ -48,7 +48,7 @@ func (w *TotalPages) SetSettings(s goatcounter.WidgetSettings) {
 }
 
 func (w *TotalPages) GetData(ctx context.Context, a Args) (more bool, err error) {
-	w.Max, err = w.Total.Totals(ctx, a.Rng, a.PathFilter, a.Daily, w.NoEvents)
+	w.Max, err = w.Total.Totals(ctx, a.Rng, a.PathFilter, a.Group, w.NoEvents)
 	w.loaded = true
 	return false, err
 }
@@ -62,7 +62,7 @@ func (w TotalPages) RenderHTML(ctx context.Context, shared SharedData) (string, 
 	// Only remove them if the last day is today: for everything else we
 	// want to display the future as "greyed out".
 	var (
-		now   = ztime.Now().In(goatcounter.MustGetUser(ctx).Settings.Timezone.Loc())
+		now   = ztime.Now(ctx).In(goatcounter.MustGetUser(ctx).Settings.Timezone.Loc())
 		today = now.Format("2006-01-02")
 		hour  = now.Hour()
 	)
@@ -82,7 +82,7 @@ func (w TotalPages) RenderHTML(ctx context.Context, shared SharedData) (string, 
 		Align    bool
 		NoEvents bool
 		Page     goatcounter.HitList
-		Daily    bool
+		Group    goatcounter.Group
 		Max      int
 
 		Total       int
@@ -91,7 +91,7 @@ func (w TotalPages) RenderHTML(ctx context.Context, shared SharedData) (string, 
 		Style string
 	}{ctx, shared.Site, shared.User, w.id, w.loaded, w.err,
 		w.Align, w.NoEvents,
-		w.Total, shared.Args.Daily, w.Max,
+		w.Total, shared.Args.Group, w.Max,
 		shared.Total, shared.TotalEvents,
 		w.Style}
 }

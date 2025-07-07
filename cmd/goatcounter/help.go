@@ -126,10 +126,6 @@ comma-separated list with any combination of:
     http        Don't serve any TLS; you can still generate ACME certificates
                 though. This is the default.
 
-    proxy       Don't serve any TLS. Similar to "http" but hint that TLS will be
-                handled by a proxy (such as Hitch, Nginx, etc.) so that cookies
-                will be set with the "secure" attribute.
-
     tls         Accept TLS connections on -listen.
 
     rdr         Redirect port 80 to the -listen port.
@@ -180,17 +176,24 @@ Proxy Setup:
     If you want to serve GoatCounter behind a proxy (HAproxy, Varnish, Hitch,
     nginx, Caddy, whatnot) then you'll want to use something like:
 
-        goatcounter serve -listen localhost:8081 -tls proxy
+        goatcounter serve -listen localhost:8081 -tls none
 
     And then forward requests on port 80 and 443 for your domain to
     localhost:8081. This assumes that the proxy will take care of the TLS
     certificate story.
 
+    It's assumed a proxy sets "X-Forwarded-Proto: https" when using TLS, and
+    "X-Forwarded-For: [..]" or "X-Real-Ip: [..]" with the client's IP. Most do
+    this by default.
+
+    GoatCounter uses WebSockets to optimize loading speed. It can work without
+    WebSockets, but it's recommended to make sure proxying WebSockets work.
+
     You can still use GoatCounter's ACME if you want:
 
-        goatcounter serve -listen localhost:8081 -tls proxy,acme
+        goatcounter serve -listen localhost:8081 -tls acme
 
-    You will have to make the proxy reads the *.pem files from the acme cache
+    You will have to make the proxy read the *.pem files from the acme cache
     directory. You may have to reload or restart the proxy for it to pick up new
     files.
 
@@ -237,4 +240,20 @@ commas.
     monitor        Additional logs in "goatcounter monitor"
     session        Internal "session" generation to track visitors
     vacuum         Deletion of deleted sites and old pageviews
+`
+
+const usageSaas = `
+This runs goatcounter.com
+
+Running your own SaaS is currently undocumented, non-trivial, and has certain
+assumptions that will not be true in your case. You do not want to run this; for
+now it can only run run goatcounter.com
+
+If you do want to run a SaaS, you're almost certainly better off writing your
+own front-end to interface with GoatCounter (this is probably how
+goatcounter.com should work as well, but it's quite some effort with low ROI to
+change that now).
+
+This command is undocumented on purpose. Get in touch if you think you need this
+(but you probably don't) and we'll see what can be done to fix you up.
 `

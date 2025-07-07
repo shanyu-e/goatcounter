@@ -7,7 +7,7 @@ import (
 	"github.com/monoculum/formam/v3"
 	"golang.org/x/text/language"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/metrics"
+	"zgo.at/goatcounter/v2/pkg/metrics"
 	"zgo.at/isbot"
 	"zgo.at/zhttp"
 	"zgo.at/zstd/ztime"
@@ -22,10 +22,6 @@ var gif = []byte{0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x1, 0x0, 0x1, 0x0, 0x80,
 func (h backend) count(w http.ResponseWriter, r *http.Request) error {
 	m := metrics.Start("/count")
 	defer m.Done()
-
-	if r.Method == "GET" {
-		metrics.Start("/count GET").Done()
-	}
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "image/gif")
@@ -56,7 +52,7 @@ func (h backend) count(w http.ResponseWriter, r *http.Request) error {
 	hit := goatcounter.Hit{
 		Site:            site.ID,
 		UserAgentHeader: r.UserAgent(),
-		CreatedAt:       ztime.Now(),
+		CreatedAt:       ztime.Now(r.Context()),
 		RemoteAddr:      r.RemoteAddr,
 	}
 	if site.Settings.Collect.Has(goatcounter.CollectLocation) {

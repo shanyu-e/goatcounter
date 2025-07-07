@@ -2,32 +2,32 @@ package goatcounter
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"zgo.at/errors"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/guru"
 	"zgo.at/json"
+	"zgo.at/otp"
 	"zgo.at/zdb"
 	"zgo.at/zstd/zbool"
 	"zgo.at/zstd/zcrypto"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/ztime"
 	"zgo.at/zstd/ztype"
 )
 
-const totpSecretLen = 16
+type UserID int32
 
 // User entry.
 type User struct {
-	ID   int64 `db:"user_id" json:"id,readonly"`
-	Site int64 `db:"site_id" json:"site,readonly"`
+	ID   UserID `db:"user_id" json:"id,readonly"`
+	Site SiteID `db:"site_id" json:"site,readonly"`
 
 	Email         string       `db:"email" json:"email"`
 	EmailVerified zbool.Bool   `db:"email_verified" json:"email_verified,readonly"`
@@ -58,14 +58,14 @@ func (u *User) Defaults(ctx context.Context) {
 	}
 
 	if u.CreatedAt.IsZero() {
-		u.CreatedAt = ztime.Now()
+		u.CreatedAt = ztime.Now(ctx)
 	} else {
-		t := ztime.Now()
+		t := ztime.Now(ctx)
 		u.UpdatedAt = &t
 	}
 
 	if u.LastReportAt.IsZero() {
-		u.LastReportAt = ztime.Now()
+		u.LastReportAt = ztime.Now(ctx)
 	}
 
 	if !u.EmailVerified {
@@ -142,11 +142,7 @@ func (u *User) Insert(ctx context.Context, allowBlankPassword bool) error {
 	}
 
 	u.TOTPEnabled = zbool.Bool(false)
-	u.TOTPSecret = make([]byte, totpSecretLen)
-	_, err = rand.Read(u.TOTPSecret)
-	if err != nil {
-		return errors.Wrap(err, "User.Insert")
-	}
+	u.TOTPSecret = otp.Secret()
 
 	query := `insert into users `
 	args := []any{u.Site, u.Email, u.Password, u.TOTPSecret, u.Settings, u.Access, u.CreatedAt, u.LastReportAt}
@@ -158,7 +154,7 @@ func (u *User) Insert(ctx context.Context, allowBlankPassword bool) error {
 		args = append(args, u.EmailToken)
 	}
 
-	u.ID, err = zdb.InsertID(ctx, "user_id", query, args)
+	u.ID, err = zdb.InsertID[UserID](ctx, "user_id", query, args)
 	if err != nil {
 		if zdb.ErrUnique(err) {
 			return guru.New(400, "this user already exists")
@@ -288,7 +284,7 @@ func (u *User) ByEmailToken(ctx context.Context, key string) error {
 }
 
 // ByID gets a user by id.
-func (u *User) ByID(ctx context.Context, id int64) error {
+func (u *User) ByID(ctx context.Context, id UserID) error {
 	err := zdb.Get(ctx, u, `select * from users where user_id=? and site_id=?`,
 		id, MustGetSite(ctx).IDOrParent())
 	return errors.Wrap(err, "User.ByID")
@@ -302,7 +298,7 @@ func (u *User) ByEmail(ctx context.Context, email string) error {
 }
 
 // ByEmail gets a user by email address for the current account.
-func (u *User) BySiteAndEmail(ctx context.Context, siteID int64, email string) error {
+func (u *User) BySiteAndEmail(ctx context.Context, siteID SiteID, email string) error {
 	err := zdb.Get(ctx, u, `select * from users where lower(email) = lower(?) and site_id = ?`,
 		email, siteID)
 	return errors.Wrapf(err, "User.ByEmail(%d, %q)", siteID, email)
@@ -310,7 +306,7 @@ func (u *User) BySiteAndEmail(ctx context.Context, siteID int64, email string) e
 
 // Find a user: by ID if ident is a number, or by email if it's not.
 func (u *User) Find(ctx context.Context, ident string) error {
-	id, err := strconv.ParseInt(ident, 10, 64)
+	id, err := zstrconv.ParseInt[UserID](ident, 10)
 	if err == nil {
 		return errors.Wrap(u.ByID(ctx, id), "User.Find")
 	}
@@ -401,20 +397,15 @@ func (u *User) EnableTOTP(ctx context.Context) error {
 func (u *User) DisableTOTP(ctx context.Context) error {
 	// Reset the totp secret to something new so that we don't end up re-using the
 	// old secret by mistake and so that we're sure that it's invalidated.
-	secret := make([]byte, totpSecretLen)
-	_, err := rand.Read(secret)
-	if err != nil {
-		return errors.Wrap(err, "User.DisableTOTP")
-	}
-
-	err = zdb.Exec(ctx, `update users set
-		totp_enabled=0, totp_secret=$1 where user_id=$2 and site_id=$3`,
-		secret, u.ID, MustGetSite(ctx).IDOrParent())
-	if err != nil {
-		return errors.Wrap(err, "User.DisableTOTP")
-	}
-	u.TOTPSecret = secret
+	u.TOTPSecret = otp.Secret()
 	u.TOTPEnabled = zbool.Bool(false)
+
+	err := zdb.Exec(ctx, `update users set
+		totp_enabled=0, totp_secret=$1 where user_id=$2 and site_id=$3`,
+		u.TOTPSecret, u.ID, MustGetSite(ctx).IDOrParent())
+	if err != nil {
+		return errors.Wrap(err, "User.DisableTOTP")
+	}
 	return nil
 }
 
@@ -426,12 +417,12 @@ func (u *User) Login(ctx context.Context) error {
 
 	u.Token = ztype.Ptr(zcrypto.Secret256())
 	if u.LoginToken == nil || *u.LoginToken == "" {
-		s := ztime.Now().Format("20060102") + "-" + zcrypto.Secret256()
+		s := ztime.Now(ctx).Format("20060102") + "-" + zcrypto.Secret256()
 		u.LoginToken = &s
 	}
 
-	u.LoginAt = ztype.Ptr(ztime.Now())
-	u.OpenAt = ztype.Ptr(ztime.Now())
+	u.LoginAt = ztype.Ptr(ztime.Now(ctx))
+	u.OpenAt = ztype.Ptr(ztime.Now(ctx))
 	err := zdb.Exec(ctx, `update users set
 			login_request=null, login_token=?, csrf_token=?, login_at=?, open_at=?
 			where user_id = ? and site_id = ?`,
@@ -446,11 +437,11 @@ func (u *User) UpdateOpenAt(ctx context.Context) error {
 	}
 
 	// Update once a day at the most.
-	if u.OpenAt != nil && u.OpenAt.After(ztime.Now().Add(-24*time.Hour)) {
+	if u.OpenAt != nil && u.OpenAt.After(ztime.Now(ctx).Add(-24*time.Hour)) {
 		return nil
 	}
 
-	u.OpenAt = ztype.Ptr(ztime.Now())
+	u.OpenAt = ztype.Ptr(ztime.Now(ctx))
 	err := zdb.Exec(ctx, `update users set open_at = ? where user_id = ? and site_id = ?`,
 		u.OpenAt, u.ID, MustGetSite(ctx).IDOrParent())
 	return errors.Wrap(err, "User.UpdateOpenAt")
@@ -512,7 +503,7 @@ func (u User) EmailReportRange(ctx context.Context) ztime.Range {
 		lastReport = ztime.Time{u.LastReportAt.In(u.Settings.Timezone.Loc())}
 		week       = ztime.Week(u.Settings.SundayStartsWeek)
 	)
-	switch u.Settings.EmailReports.Int() {
+	switch u.Settings.EmailReports {
 	case EmailReportNever:
 		return ztime.Range{}
 
@@ -528,7 +519,7 @@ func (u User) EmailReportRange(ctx context.Context) ztime.Range {
 	case EmailReportWeekly:
 		start, end = lastReport.StartOf(week), lastReport.EndOf(week)
 	default:
-		log.Errorf(ctx, "invalid EmailReports value for user %d: %d", u.ID, u.Settings.EmailReports.Int())
+		log.Errorf(ctx, "invalid EmailReports value for user %d: %d", u.ID, u.Settings.EmailReports)
 		return ztime.Range{}
 	}
 
@@ -546,7 +537,7 @@ func (u User) EmailShort() string {
 type Users []User
 
 // List all users for a site.
-func (u *Users) List(ctx context.Context, siteID int64) error {
+func (u *Users) List(ctx context.Context, siteID SiteID) error {
 	var s Site
 	err := s.ByID(ctx, siteID)
 	if err != nil {
@@ -575,7 +566,7 @@ func (u *Users) ByEmail(ctx context.Context, email string) error {
 }
 
 // BySite gets all users for a site.
-func (u *Users) BySite(ctx context.Context, siteID int64) error {
+func (u *Users) BySite(ctx context.Context, siteID SiteID) error {
 	err := zdb.Select(ctx, u,
 		`select * from users where site_id=? order by user_id asc`, siteID)
 	return errors.Wrap(err, "Users.BySite")
@@ -593,10 +584,10 @@ func (u *Users) Find(ctx context.Context, ident []string) error {
 }
 
 // IDs gets a list of all IDs for these users.
-func (u *Users) IDs() []int64 {
-	ids := make([]int64, 0, len(*u))
+func (u *Users) IDs() []int32 {
+	ids := make([]int32, 0, len(*u))
 	for _, uu := range *u {
-		ids = append(ids, uu.ID)
+		ids = append(ids, int32(uu.ID))
 	}
 	return ids
 }

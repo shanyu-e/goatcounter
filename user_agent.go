@@ -6,23 +6,22 @@ import (
 	"zgo.at/errors"
 	"zgo.at/gadget"
 	"zgo.at/isbot"
-	"zgo.at/zcache"
 	"zgo.at/zdb"
 )
 
 type UserAgent struct {
 	UserAgent string
 	Isbot     uint8
-	BrowserID int64
-	SystemID  int64
+	BrowserID BrowserID
+	SystemID  SystemID
 }
 
 func (p *UserAgent) GetOrInsert(ctx context.Context) error {
 	shortUA := gadget.ShortenUA(p.UserAgent)
 	c, ok := cacheUA(ctx).Get(p.UserAgent)
 	if ok {
-		*p = c.(UserAgent)
-		cacheUA(ctx).Touch(shortUA, zcache.DefaultExpiration)
+		*p = c
+		cacheUA(ctx).Touch(shortUA)
 		return nil
 	}
 
@@ -46,22 +45,24 @@ func (p *UserAgent) GetOrInsert(ctx context.Context) error {
 
 	p.Isbot = uint8(isbot.UserAgent(p.UserAgent))
 
-	cacheUA(ctx).SetDefault(shortUA, *p)
+	cacheUA(ctx).Set(shortUA, *p)
 	return nil
 }
 
+type BrowserID int32
+
 type Browser struct {
-	ID      int64  `db:"browser_id"`
-	Name    string `db:"name"`
-	Version string `db:"version"`
+	ID      BrowserID `db:"browser_id"`
+	Name    string    `db:"name"`
+	Version string    `db:"version"`
 }
 
 func (b *Browser) GetOrInsert(ctx context.Context, name, version string) error {
 	k := name + version
 	c, ok := cacheBrowsers(ctx).Get(k)
 	if ok {
-		*b = c.(Browser)
-		cacheBrowsers(ctx).Touch(k, zcache.DefaultExpiration)
+		*b = c
+		cacheBrowsers(ctx).Touch(k)
 		return nil
 	}
 
@@ -72,29 +73,31 @@ func (b *Browser) GetOrInsert(ctx context.Context, name, version string) error {
 		`select browser_id from browsers where name=$1 and version=$2`,
 		name, version)
 	if zdb.ErrNoRows(err) {
-		b.ID, err = zdb.InsertID(ctx, "browser_id",
+		b.ID, err = zdb.InsertID[BrowserID](ctx, "browser_id",
 			`insert into browsers (name, version) values ($1, $2)`,
 			name, version)
 	}
 	if err != nil {
 		return errors.Wrapf(err, "Browser.GetOrInsert %q %q", name, version)
 	}
-	cacheBrowsers(ctx).SetDefault(k, *b)
+	cacheBrowsers(ctx).Set(k, *b)
 	return nil
 }
 
+type SystemID int32
+
 type System struct {
-	ID      int64  `db:"system_id"`
-	Name    string `db:"name"`
-	Version string `db:"version"`
+	ID      SystemID `db:"system_id"`
+	Name    string   `db:"name"`
+	Version string   `db:"version"`
 }
 
 func (s *System) GetOrInsert(ctx context.Context, name, version string) error {
 	k := name + version
 	c, ok := cacheSystems(ctx).Get(k)
 	if ok {
-		*s = c.(System)
-		cacheSystems(ctx).Touch(k, zcache.DefaultExpiration)
+		*s = c
+		cacheSystems(ctx).Touch(k)
 		return nil
 	}
 
@@ -105,13 +108,13 @@ func (s *System) GetOrInsert(ctx context.Context, name, version string) error {
 		`select system_id from systems where name=$1 and version=$2`,
 		name, version)
 	if zdb.ErrNoRows(err) {
-		s.ID, err = zdb.InsertID(ctx, "system_id",
+		s.ID, err = zdb.InsertID[SystemID](ctx, "system_id",
 			`insert into systems (name, version) values ($1, $2)`,
 			name, version)
 	}
 	if err != nil {
 		return errors.Wrapf(err, "System.GetOrInsert %q %q", name, version)
 	}
-	cacheSystems(ctx).SetDefault(k, *s)
+	cacheSystems(ctx).Set(k, *s)
 	return nil
 }

@@ -17,8 +17,8 @@ import (
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/handlers"
-	"zgo.at/goatcounter/v2/log"
-	"zgo.at/goatcounter/v2/logscan"
+	"zgo.at/goatcounter/v2/pkg/log"
+	"zgo.at/goatcounter/v2/pkg/logscan"
 	"zgo.at/json"
 	"zgo.at/zli"
 	"zgo.at/zstd/znet"
@@ -105,7 +105,7 @@ Flags:
                anything.
 
                The syntax is [field]:[pattern]; the [field] is one of the fields
-               listed in "help logile". The pattern can be prefixed with "glob:"
+               listed in "help logfile". The pattern can be prefixed with "glob:"
                or "re:" to get globbing or regular expressions:
 
                    path:.gif                             Anywhere in the path

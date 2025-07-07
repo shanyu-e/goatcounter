@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"zgo.at/bgrun"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/zstd/zruntime"
 	"zgo.at/zstd/zsync"
 )
@@ -24,8 +24,8 @@ func (t Task) ID() string {
 }
 
 var Tasks = []Task{
-	{"vacuum pageviews (data retention)", dataRetention, 1 * time.Hour},
-	{"vacuum pageviews (old bot)", oldBot, 1 * time.Hour},
+	{"vacuum pageviews (data retention)", dataRetention, 24 * time.Hour},
+	{"vacuum pageviews (old bot)", oldBot, 24 * time.Hour},
 	{"renew ACME certs", renewACME, 2 * time.Hour},
 	{"vacuum soft-deleted sites", vacuumDeleted, 12 * time.Hour},
 	{"rm old exports", oldExports, 1 * time.Hour},

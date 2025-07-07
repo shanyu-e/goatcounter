@@ -17,12 +17,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sethvargo/go-limiter"
-	"zgo.at/bgrun"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
 	"zgo.at/goatcounter/v2/cron"
-	"zgo.at/goatcounter/v2/log"
-	"zgo.at/goatcounter/v2/metrics"
+	"zgo.at/goatcounter/v2/pkg/bgrun"
+	"zgo.at/goatcounter/v2/pkg/log"
+	"zgo.at/goatcounter/v2/pkg/metrics"
 	"zgo.at/guru"
 	"zgo.at/isbot"
 	"zgo.at/zdb"
@@ -31,6 +31,7 @@ import (
 	"zgo.at/zstd/zbool"
 	"zgo.at/zstd/zint"
 	"zgo.at/zstd/zslice"
+	"zgo.at/zstd/zstrconv"
 	"zgo.at/zstd/ztime"
 	"zgo.at/zvalidate"
 )
@@ -207,7 +208,7 @@ func (h api) auth(r *http.Request, w http.ResponseWriter, require zint.Bitflag64
 	}
 
 	// Update once a day at the most.
-	if token.LastUsedAt == nil || token.LastUsedAt.Before(ztime.Now().Add(-24*time.Hour)) {
+	if token.LastUsedAt == nil || token.LastUsedAt.Before(ztime.Now(r.Context()).Add(-24*time.Hour)) {
 		err := token.UpdateLastUsed(r.Context())
 		if err != nil {
 			log.Error(r.Context(), err)
@@ -240,7 +241,7 @@ func (h api) auth(r *http.Request, w http.ResponseWriter, require zint.Bitflag64
 
 type apiExportRequest struct {
 	// Pagination cursor; only export hits with an ID greater than this.
-	StartFromHitID int64 `json:"start_from_hit_id"`
+	StartFromHitID goatcounter.HitID `json:"start_from_hit_id"`
 }
 
 // For testing various generic properties about the API.
@@ -364,7 +365,7 @@ func (h api) exportGet(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.ExportID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -397,7 +398,7 @@ func (h api) exportDownload(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.ExportID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -415,7 +416,7 @@ func (h api) exportDownload(w http.ResponseWriter, r *http.Request) error {
 
 	fp, err := os.Open(export.Path)
 	if err != nil {
-		if os.IsNotExist(err) && export.FinishedAt.Add(24*time.Hour).After(ztime.Now()) {
+		if os.IsNotExist(err) && export.FinishedAt.Add(24*time.Hour).After(ztime.Now(r.Context())) {
 			w.WriteHeader(400)
 			return zhttp.JSON(w, apiError{Error: "exports are kept for 24 hours; this export file has been deleted"})
 		}
@@ -477,7 +478,10 @@ type APICountRequestHit struct {
 	// string.
 	Ref string `json:"ref" query:"r"`
 
-	// Screen size as "x,y,scaling"
+	// Screen width.
+	//
+	// For compatibility it also accepts the size as "width,height,scaling", but
+	// the height and scaling are not used and this format is deprecated.
 	Size goatcounter.Floats `json:"size" query:"s"`
 
 	// Query parameters for this pageview, used to get campaign parameters.
@@ -686,7 +690,7 @@ func (h api) siteList(w http.ResponseWriter, r *http.Request) error {
 
 func (h api) siteFind(r *http.Request) (*goatcounter.Site, error) {
 	v := goatcounter.NewValidate(r.Context())
-	id := v.Integer("id", chi.URLParam(r, "id"))
+	id := goatcounter.SiteID(v.Integer32("id", chi.URLParam(r, "id")))
 	if v.HasErrors() {
 		return nil, v
 	}
@@ -806,7 +810,7 @@ type (
 		Limit int `json:"limit"`
 
 		// Only select paths after this ID, for pagination.
-		After int64 `json:"after"`
+		After goatcounter.PathID `json:"after"`
 	}
 	apiPathsResponse struct {
 		// List of paths, sorted by ID.
@@ -823,9 +827,6 @@ type (
 // Query: apiPathsRequest
 // Response 200: apiPathsResponse
 func (h api) paths(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	err := h.auth(r, w, goatcounter.APIPermStats)
 	if err != nil {
 		return err
@@ -859,9 +860,13 @@ type (
 		// End time, should be rounded to the hour {datetime, default: current time}.
 		End time.Time `json:"end" query:"end"`
 
-		// Group by day, rather than by hour. This only affects the Hits.Max
-		// value: if enabled it's set to the highest value for that day, rather
-		// than the highest value for the hour.
+		// Set Max value in the response to the highest daily value, instead of
+		// hourly.
+		//
+		// Both the Hourly and Daily are always included in the response – this
+		// only affects the Max value, which is useful if you want to draw
+		// charts like the GoatCounter dashboard: you need to know the maximum
+		// Y-axis value of the chart to draw it.
 		Daily bool `json:"daily" query:"daily"`
 
 		// Include only these path IDs; default is to include everything.
@@ -900,9 +905,6 @@ type (
 // Query: apiHitsRequest
 // Response 200: apiHitsResponse
 func (h api) hits(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	err := h.auth(r, w, goatcounter.APIPermStats)
 	if err != nil {
 		return err
@@ -919,10 +921,10 @@ func (h api) hits(w http.ResponseWriter, r *http.Request) error {
 		args.Limit = 1
 	}
 	if args.Start.IsZero() {
-		args.Start = ztime.AddPeriod(ztime.Now(), -7, ztime.Day)
+		args.Start = ztime.AddPeriod(ztime.Now(r.Context()), -7, ztime.Day)
 	}
 	if args.End.IsZero() {
-		args.End = ztime.Now()
+		args.End = ztime.Now(r.Context())
 	}
 
 	includeIDs, excludeIDs, err := findPaths(r.Context(), args.PathByName, args.IncludePaths, args.ExcludePaths)
@@ -930,9 +932,19 @@ func (h api) hits(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	group := goatcounter.GroupHourly
+	if args.Daily {
+		// TODO: ideally would like to refactor this to Group, or maybe just
+		// remove. Lets see if anyone is using it.
+		m := metrics.Start("api-hits-daily")
+		m.AddTag(strconv.FormatInt(int64(Site(r.Context()).ID), 10))
+		m.Done()
+		group = goatcounter.GroupDaily
+	}
+
 	var pages goatcounter.HitLists
 	tdu, more, err := pages.List(r.Context(), ztime.NewRange(args.Start).To(args.End),
-		includeIDs, excludeIDs, args.Limit, args.Daily)
+		includeIDs, excludeIDs, args.Limit, group)
 	if err != nil {
 		return err
 	}
@@ -970,16 +982,13 @@ type (
 // Query: apiRefsRequest
 // Response 200: apiRefsResponse
 func (h api) refs(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	err := h.auth(r, w, goatcounter.APIPermStats)
 	if err != nil {
 		return err
 	}
 
 	v := zvalidate.New()
-	path := v.Integer("path_id", chi.URLParam(r, "path_id"))
+	path := goatcounter.PathID(v.Integer32("path_id", chi.URLParam(r, "path_id")))
 	if v.HasErrors() {
 		return v
 	}
@@ -995,10 +1004,10 @@ func (h api) refs(w http.ResponseWriter, r *http.Request) error {
 		args.Limit = 1
 	}
 	if args.Start.IsZero() {
-		args.Start = ztime.AddPeriod(ztime.Now(), -7, ztime.Day)
+		args.Start = ztime.AddPeriod(ztime.Now(r.Context()), -7, ztime.Day)
 	}
 	if args.End.IsZero() {
-		args.End = ztime.Now()
+		args.End = ztime.Now(r.Context())
 	}
 
 	var refs goatcounter.HitStats
@@ -1059,9 +1068,6 @@ type (
 // Query: apiCountTotalRequest
 // Response 200: apiCountTotalResponse
 func (h api) countTotal(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	err := h.auth(r, w, goatcounter.APIPermStats)
 	if err != nil {
 		return err
@@ -1072,10 +1078,10 @@ func (h api) countTotal(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if args.Start.IsZero() {
-		args.Start = ztime.AddPeriod(ztime.Now(), -7, ztime.Day)
+		args.Start = ztime.AddPeriod(ztime.Now(r.Context()), -7, ztime.Day)
 	}
 	if args.End.IsZero() {
-		args.End = ztime.Now()
+		args.End = ztime.Now(r.Context())
 	}
 
 	includeIDs, _, err := findPaths(r.Context(), args.PathByName, args.IncludePaths, nil)
@@ -1099,7 +1105,7 @@ func (h api) countTotal(w http.ResponseWriter, r *http.Request) error {
 	func() {
 		defer wg.Done()
 		defer log.Recover(r.Context())
-		_, oErr = total.Totals(r.Context(), rng, includeIDs, true, false)
+		_, oErr = total.Totals(r.Context(), rng, includeIDs, goatcounter.GroupDaily, false)
 	}()
 	wg.Wait()
 	if tcErr != nil {
@@ -1152,9 +1158,6 @@ type (
 // Query: apiStatsRequest
 // Response 200: apiStatsResponse
 func (h api) stats(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	v := goatcounter.NewValidate(r.Context())
 	page := v.Include("page", chi.URLParam(r, "page"), []string{
 		"browsers", "systems", "locations", "languages", "sizes", "campaigns", "toprefs"})
@@ -1178,15 +1181,15 @@ func (h api) stats(w http.ResponseWriter, r *http.Request) error {
 		args.Limit = 1
 	}
 	if args.Start.IsZero() {
-		args.Start = ztime.AddPeriod(ztime.Now(), -7, ztime.Day)
+		args.Start = ztime.AddPeriod(ztime.Now(r.Context()), -7, ztime.Day)
 	}
 	if args.End.IsZero() {
-		args.End = ztime.Now()
+		args.End = ztime.Now(r.Context())
 	}
 
 	var (
 		stats goatcounter.HitStats
-		f     func(ctx context.Context, rng ztime.Range, pathFilter []int64, limit, offset int) error
+		f     func(ctx context.Context, rng ztime.Range, pathFilter []goatcounter.PathID, limit, offset int) error
 	)
 	switch page {
 	case "browsers":
@@ -1198,7 +1201,7 @@ func (h api) stats(w http.ResponseWriter, r *http.Request) error {
 	case "languages":
 		f = stats.ListLanguages
 	case "sizes":
-		f = func(ctx context.Context, rng ztime.Range, pathFilter []int64, _, _ int) error {
+		f = func(ctx context.Context, rng ztime.Range, pathFilter []goatcounter.PathID, _, _ int) error {
 			return stats.ListSizes(ctx, rng, pathFilter)
 		}
 	case "campaigns":
@@ -1237,9 +1240,6 @@ func (h api) stats(w http.ResponseWriter, r *http.Request) error {
 // Query: apiStatsRequest
 // Response 200: apiStatsResponse
 func (h api) statsDetail(w http.ResponseWriter, r *http.Request) error {
-	m := metrics.Start("/api/v0/stats/*")
-	defer m.Done()
-
 	v := goatcounter.NewValidate(r.Context())
 	page := v.Include("page", chi.URLParam(r, "page"), []string{
 		"browsers", "systems", "locations", "sizes", "campaigns", "toprefs"})
@@ -1263,15 +1263,15 @@ func (h api) statsDetail(w http.ResponseWriter, r *http.Request) error {
 		args.Limit = 1
 	}
 	if args.Start.IsZero() {
-		args.Start = ztime.AddPeriod(ztime.Now(), -7, ztime.Day)
+		args.Start = ztime.AddPeriod(ztime.Now(r.Context()), -7, ztime.Day)
 	}
 	if args.End.IsZero() {
-		args.End = ztime.Now()
+		args.End = ztime.Now(r.Context())
 	}
 
 	var (
 		stats goatcounter.HitStats
-		f     func(ctx context.Context, id string, rng ztime.Range, pathFilter []int64, limit, offset int) error
+		f     func(ctx context.Context, id string, rng ztime.Range, pathFilter []goatcounter.PathID, limit, offset int) error
 	)
 	switch page {
 	case "browsers":
@@ -1285,8 +1285,8 @@ func (h api) statsDetail(w http.ResponseWriter, r *http.Request) error {
 	case "toprefs":
 		f = stats.ListTopRef
 	case "campaigns":
-		f = func(ctx context.Context, id string, rng ztime.Range, pathFilter []int64, limit, offset int) error {
-			n, err := strconv.ParseInt(id, 0, 64)
+		f = func(ctx context.Context, id string, rng ztime.Range, pathFilter []goatcounter.PathID, limit, offset int) error {
+			n, err := zstrconv.ParseInt[goatcounter.CampaignID](id, 0)
 			if err != nil {
 				return err
 			}
@@ -1309,10 +1309,10 @@ func (h api) statsDetail(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
-func findPaths(ctx context.Context, byName bool, includePaths, excludePaths goatcounter.Strings) ([]int64, []int64, error) {
+func findPaths(ctx context.Context, byName bool, includePaths, excludePaths goatcounter.Strings) ([]goatcounter.PathID, []goatcounter.PathID, error) {
 	var (
-		includeIDs = make([]int64, 0, len(includePaths))
-		excludeIDs = make([]int64, 0, len(excludePaths))
+		includeIDs = make([]goatcounter.PathID, 0, len(includePaths))
+		excludeIDs = make([]goatcounter.PathID, 0, len(excludePaths))
 	)
 	if byName {
 		var err error
@@ -1338,14 +1338,14 @@ func findPaths(ctx context.Context, byName bool, includePaths, excludePaths goat
 	}
 
 	for _, s := range includePaths {
-		n, err := strconv.ParseInt(s, 10, 64)
+		n, err := zstrconv.ParseInt[goatcounter.PathID](s, 10)
 		if err != nil {
 			return nil, nil, guru.Errorf(400, "invalid number in include_paths: %w", err)
 		}
 		includeIDs = append(includeIDs, n)
 	}
 	for _, s := range excludePaths {
-		n, err := strconv.ParseInt(s, 10, 64)
+		n, err := zstrconv.ParseInt[goatcounter.PathID](s, 10)
 		if err != nil {
 			return nil, nil, guru.Errorf(400, "invalid number in exclude_paths: %w", err)
 		}

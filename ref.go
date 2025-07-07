@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"zgo.at/errors"
-	"zgo.at/zcache"
 	"zgo.at/zdb"
 	"zgo.at/zstd/ztime"
 	"zgo.at/zstd/ztype"
@@ -82,8 +81,10 @@ var hostAlias = map[string]string{
 	"fr.reddit.com":      "www.reddit.com",
 }
 
+type RefID int32
+
 type Ref struct {
-	ID        int64   `db:"ref_id"`
+	ID        RefID   `db:"ref_id"`
 	Ref       string  `db:"ref"`
 	RefScheme *string `db:"ref_scheme"`
 }
@@ -113,8 +114,8 @@ func (r *Ref) GetOrInsert(ctx context.Context) error {
 	}
 	c, ok := cacheRefs(ctx).Get(k)
 	if ok {
-		*r = c.(Ref)
-		cacheRefs(ctx).Touch(k, zcache.DefaultExpiration)
+		*r = c
+		cacheRefs(ctx).Touch(k)
 		return nil
 	}
 
@@ -129,21 +130,23 @@ func (r *Ref) GetOrInsert(ctx context.Context) error {
 		where lower(ref) = lower(?) and ref_scheme = ?
 		limit 1`, r.Ref, r.RefScheme)
 	if err == nil {
-		cacheRefs(ctx).SetDefault(k, *r)
+		cacheRefs(ctx).Set(k, *r)
 		return nil
 	}
 	if !zdb.ErrNoRows(err) {
-		return errors.Wrap(err, "Ref.GetOrInsert get")
+		return errors.Wrapf(err, "Ref.GetOrInsert %q %q: %w",
+			ztype.Deref(r.RefScheme, "<nil>"), r.Ref, err)
 	}
 
-	r.ID, err = zdb.InsertID(ctx, "ref_id",
+	r.ID, err = zdb.InsertID[RefID](ctx, "ref_id",
 		`insert into refs (ref, ref_scheme) values (?, ?)`,
 		r.Ref, r.RefScheme)
 	if err != nil {
-		return errors.Wrap(err, "Ref.GetOrInsert insert")
+		return errors.Wrapf(err, "Ref.GetOrInsert %q %q: %w",
+			ztype.Deref(r.RefScheme, "<nil>"), r.Ref, err)
 	}
 
-	cacheRefs(ctx).SetDefault(k, *r)
+	cacheRefs(ctx).Set(k, *r)
 	return nil
 }
 
@@ -253,7 +256,7 @@ func cleanRefURL(ref string, refURL *url.URL) (string, bool) {
 }
 
 // ListRefsByPath lists all references for a pathID.
-func (h *HitStats) ListRefsByPathID(ctx context.Context, pathID int64, rng ztime.Range, limit, offset int) error {
+func (h *HitStats) ListRefsByPathID(ctx context.Context, pathID PathID, rng ztime.Range, limit, offset int) error {
 	err := zdb.Select(ctx, &h.Stats, "load:ref.ListRefsByPathID.sql", map[string]any{
 		"site":   MustGetSite(ctx).ID,
 		"start":  rng.Start,

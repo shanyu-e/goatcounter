@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
@@ -13,9 +14,10 @@ import (
 	"github.com/sethvargo/go-limiter"
 	"zgo.at/errors"
 	"zgo.at/goatcounter/v2"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/guru"
 	"zgo.at/json"
+	"zgo.at/slog_align"
 	"zgo.at/termtext"
 	"zgo.at/z18n"
 	"zgo.at/zdb"
@@ -34,7 +36,7 @@ var Started time.Time
 
 var (
 	redirect = func(w http.ResponseWriter, r *http.Request) error {
-		zhttp.Flash(w, "Need to log in")
+		zhttp.Flash(w, r, "Need to log in")
 		return guru.New(303, goatcounter.Config(r.Context()).BasePath+"/user/new")
 	}
 
@@ -71,8 +73,8 @@ var (
 				Value:    a,
 				Path:     "/",
 				HttpOnly: true,
-				Secure:   zhttp.CookieSecure,
-				SameSite: zhttp.CookieSameSite,
+				Secure:   zhttp.IsSecure(r),
+				SameSite: zhttp.CookieSameSiteHelper(r),
 			})
 			hide := ""
 			if r.URL.Query().Get("hideui") != "" {
@@ -107,7 +109,7 @@ var (
 type statusWriter interface{ Status() int }
 
 func addctx(db zdb.DB, loadSite bool, dashTimeout int) func(http.Handler) http.Handler {
-	Started = ztime.Now()
+	Started = time.Now()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -116,7 +118,7 @@ func addctx(db zdb.DB, loadSite bool, dashTimeout int) func(http.Handler) http.H
 			if r.URL.Path == "/status" {
 				info, _ := zdb.Info(ctx)
 				j, err := json.Marshal(map[string]any{
-					"uptime":   ztime.Now().Sub(Started).Round(time.Second).String(),
+					"uptime":   ztime.Now(r.Context()).Sub(Started).Round(time.Second).String(),
 					"version":  goatcounter.Version,
 					"database": zdb.SQLDialect(ctx).String() + " " + string(info.Version),
 					"go":       runtime.Version(),
@@ -184,11 +186,16 @@ func addctx(db zdb.DB, loadSite bool, dashTimeout int) func(http.Handler) http.H
 
 						if r.URL.Path == "/" {
 							txt := fmt.Sprintf(""+
-								"accessing the site on domain %q, but the configured domain is %q; "+
-								"this will work fine as long as you only have one site, but you *need* to use the "+
+								"Accessing the site on domain %q, but the configured domain is %q.\n\n"+
+								"This will work fine as long as you only have one site, but you *need* to use the "+
 								"configured domain if you add a second site so GoatCounter will know which site to use.",
 								znet.RemovePort(r.Host), *s.Cname)
-							log.Info(r.Context(), termtext.WordWrap(txt, 55, strings.Repeat(" ", 25)))
+							if _, ok := slog.Default().Handler().(slog_align.AlignedHandler); ok {
+								txt = termtext.WordWrap(txt, 70, "")
+							} else {
+								txt = strings.ReplaceAll(txt, "\n\n", " ")
+							}
+							log.Warn(r.Context(), txt)
 						}
 					}
 					if err2 == nil && len(sites) == 0 {
@@ -200,10 +207,7 @@ func addctx(db zdb.DB, loadSite bool, dashTimeout int) func(http.Handler) http.H
 				if err != nil {
 					if zdb.ErrNoRows(err) {
 						err = guru.Errorf(400, "no site at this domain (%q)", r.Host)
-					} else {
-						log.Error(ctx, err, log.AttrHTTP(r))
 					}
-
 					zhttp.ErrPage(w, r, err)
 					return
 				}
@@ -285,7 +289,7 @@ func noSites(db zdb.DB, w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 
-			auth.SetCookie(w, *u.LoginToken, cookieDomain(&s, r))
+			auth.SetCookie(w, r, *u.LoginToken, cookieDomain(&s, r))
 			return nil
 		})
 		if tplErr != nil {

@@ -24,7 +24,7 @@ func TestHitListsList(t *testing.T) {
 	tests := []struct {
 		in         []Hit
 		inFilter   string
-		inExclude  []int64
+		inExclude  []PathID
 		wantReturn string
 		wantStats  HitLists
 	}{
@@ -118,7 +118,7 @@ func TestHitListsList(t *testing.T) {
 				{FirstVisit: true, CreatedAt: hit, Path: "/aaaa"},
 			},
 			inFilter:   "a",
-			inExclude:  []int64{4, 3},
+			inExclude:  []PathID{4, 3},
 			wantReturn: "2 false <nil>",
 			wantStats: HitLists{
 				HitList{Count: 1, Path: "/aa", RefScheme: nil, Stats: []HitListStat{
@@ -164,7 +164,7 @@ func TestHitListsList(t *testing.T) {
 			}
 
 			var stats HitLists
-			uniqueDisplay, more, err := stats.List(ctx, rng, pathsFilter, tt.inExclude, 2, false)
+			uniqueDisplay, more, err := stats.List(ctx, rng, pathsFilter, tt.inExclude, 2, GroupHourly)
 
 			have := fmt.Sprintf("%d %t %v", uniqueDisplay, more, err)
 			if have != tt.wantReturn {
@@ -184,10 +184,9 @@ func TestHitListsList(t *testing.T) {
 }
 
 func TestGetTotalCount(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:00:00")
 	ctx := gctest.DB(t)
-
-	rng := ztime.NewRange(ztime.Now()).To(ztime.Now())
+	ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:00:00"))
+	rng := ztime.NewRange(ztime.Now(ctx)).To(ztime.Now(ctx))
 
 	gctest.StoreHits(ctx, t, false,
 		Hit{Path: "/a", FirstVisit: true},
@@ -214,8 +213,8 @@ func TestGetTotalCount(t *testing.T) {
 }
 
 func TestHitListTotals(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:00:00")
 	ctx := gctest.DB(t)
+	ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:00:00"))
 
 	gctest.StoreHits(ctx, t, false,
 		Hit{Path: "/a", FirstVisit: true},
@@ -233,7 +232,7 @@ func TestHitListTotals(t *testing.T) {
 	)
 
 	t.Run("hourly", func(t *testing.T) {
-		rng := ztime.NewRange(ztime.Now()).To(ztime.Now())
+		rng := ztime.NewRange(ztime.Now(ctx)).To(ztime.Now(ctx))
 
 		want := [][]string{
 			{`10`, `{
@@ -288,10 +287,10 @@ func TestHitListTotals(t *testing.T) {
 					"daily":   0
 				}]}`},
 		}
-		for i, filter := range [][]int64{nil, []int64{1}, []int64{2}, []int64{1, 2}} {
+		for i, filter := range [][]PathID{nil, []PathID{1}, []PathID{2}, []PathID{1, 2}} {
 			t.Run("", func(t *testing.T) {
 				var hs HitList
-				count, err := hs.Totals(ctx, rng, filter, false, false)
+				count, err := hs.Totals(ctx, rng, filter, GroupHourly, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -307,7 +306,7 @@ func TestHitListTotals(t *testing.T) {
 	})
 
 	t.Run("daily", func(t *testing.T) {
-		rng := ztime.NewRange(ztime.Now()).To(ztime.Now())
+		rng := ztime.NewRange(ztime.Now(ctx)).To(ztime.Now(ctx))
 
 		want := [][]string{
 			{`10`, `{
@@ -363,10 +362,10 @@ func TestHitListTotals(t *testing.T) {
 				}]}`},
 		}
 
-		for i, filter := range [][]int64{nil, []int64{1}, []int64{2}, []int64{1, 2}} {
+		for i, filter := range [][]PathID{nil, []PathID{1}, []PathID{2}, []PathID{1, 2}} {
 			t.Run("", func(t *testing.T) {
 				var hs HitList
-				count, err := hs.Totals(ctx, rng, filter, true, false)
+				count, err := hs.Totals(ctx, rng, filter, GroupDaily, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -383,19 +382,19 @@ func TestHitListTotals(t *testing.T) {
 }
 
 func TestHitListsPathCount(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18")
 	ctx := gctest.DB(t)
+	ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18"))
 
 	gctest.StoreHits(ctx, t, false,
 		Hit{FirstVisit: true, Path: "/"},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-9 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-9 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-9 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-9 * 24 * time.Hour)},
 		Hit{FirstVisit: false, Path: "/"},
 
 		Hit{FirstVisit: true, Path: "/a"},
-		Hit{FirstVisit: true, Path: "/a", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/a", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
 	)
 
 	{
@@ -422,8 +421,8 @@ func TestHitListsPathCount(t *testing.T) {
 	{
 		var have HitList
 		err := have.PathCount(ctx, "/", ztime.NewRange(
-			ztime.Now().Add(-8*24*time.Hour)).
-			To(ztime.Now().Add(-1*24*time.Hour)))
+			ztime.Now(ctx).Add(-8*24*time.Hour)).
+			To(ztime.Now(ctx).Add(-1*24*time.Hour)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -444,19 +443,19 @@ func TestHitListsPathCount(t *testing.T) {
 }
 
 func TestHitListSiteTotalUnique(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18")
 	ctx := gctest.DB(t)
+	ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18"))
 
 	gctest.StoreHits(ctx, t, false,
 		Hit{FirstVisit: true, Path: "/"},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-9 * 24 * time.Hour)},
-		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now().Add(-9 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-9 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/", CreatedAt: ztime.Now(ctx).Add(-9 * 24 * time.Hour)},
 
 		Hit{FirstVisit: false, Path: "/"},
 		Hit{FirstVisit: true, Path: "/a"},
-		Hit{FirstVisit: true, Path: "/a", CreatedAt: ztime.Now().Add(-2 * 24 * time.Hour)},
+		Hit{FirstVisit: true, Path: "/a", CreatedAt: ztime.Now(ctx).Add(-2 * 24 * time.Hour)},
 	)
 
 	{
@@ -483,8 +482,8 @@ func TestHitListSiteTotalUnique(t *testing.T) {
 	{
 		var have HitList
 		err := have.SiteTotalUTC(ctx, ztime.NewRange(
-			ztime.Now().Add(-8*24*time.Hour)).
-			To(ztime.Now().Add(-1*24*time.Hour)))
+			ztime.Now(ctx).Add(-8*24*time.Hour)).
+			To(ztime.Now(ctx).Add(-1*24*time.Hour)))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -37,6 +37,7 @@ func newAPITest(ctx context.Context, t *testing.T,
 		UserID:      User(ctx).ID,
 		Name:        "test",
 		Permissions: perm,
+		Sites:       goatcounter.SiteIDs{-1},
 	}
 	err := token.Insert(ctx)
 	if err != nil {
@@ -251,13 +252,18 @@ func TestAPIBasics(t *testing.T) {
 }
 
 func TestAPICount(t *testing.T) {
+	empty := `
+		hit_id  site_id  path  title  event  browser  system  session  ref  ref_s  width  loc  first  created_at
+
+		site_id  path  bot  user_agent  created_at
+	`
 	tests := []struct {
 		body     APICountRequest
 		wantCode int
 		wantRet  string
 		want     string
 	}{
-		{APICountRequest{}, 400, `{"error":"no hits"}`, ``},
+		{APICountRequest{}, 400, `{"error":"no hits"}`, empty},
 
 		{
 			APICountRequest{NoSessions: true, Hits: []APICountRequestHit{
@@ -265,9 +271,11 @@ func TestAPICount(t *testing.T) {
 				{Path: "/bar", CreatedAt: time.Date(2020, 1, 18, 14, 42, 0, 0, time.UTC)},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser  system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0                       00112233445566778899aabbccddef01  0         NULL   NULL       1      2020-06-18 14:42:00
-			2       1        /bar         0                       00112233445566778899aabbccddef01  0         NULL   NULL       1      2020-01-18 14:42:00
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL        1      2020-06-18 14:42:00
+			2       1        /bar         0                       00112233445566778899aabbccddef01       NULL   NULL        1      2020-01-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -277,8 +285,45 @@ func TestAPICount(t *testing.T) {
 				{Path: "/foo", Title: "A", Ref: "y", UserAgent: "Mozilla/5.0 (Linux) Firefox/1", Location: "ET", Size: goatcounter.Floats{42, 666, 2}},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser    system  session                           bot  ref  ref_s  size        loc  first  created_at
-			1       1        /foo  A      0      Firefox 1  Linux   00112233445566778899aabbccddef01  0    y    o      42,666,2.0  ET   1      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser    system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo  A      0      Firefox 1  Linux   00112233445566778899aabbccddef01  y    o      42     ET   1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
+			`,
+		},
+
+		// Width
+		{
+			APICountRequest{NoSessions: true, Hits: []APICountRequestHit{
+				{Path: "/a", Size: goatcounter.Floats{42, 666, 2}},
+			}},
+			202, respOK, `
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /a           0                       00112233445566778899aabbccddef01       NULL   42          1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
+			`,
+		},
+		{
+			APICountRequest{NoSessions: true, Hits: []APICountRequestHit{
+				{Path: "/a", Size: goatcounter.Floats{42, 666}},
+			}},
+			202, respOK, `
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /a           0                       00112233445566778899aabbccddef01       NULL   42          1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
+			`,
+		},
+		{
+			APICountRequest{NoSessions: true, Hits: []APICountRequestHit{
+				{Path: "/a", Size: goatcounter.Floats{42}},
+			}},
+			202, respOK, `
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /a           0                       00112233445566778899aabbccddef01       NULL   42          1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -288,8 +333,10 @@ func TestAPICount(t *testing.T) {
 				{Event: zbool.Bool(true), Path: "/foo", Title: "A", Ref: "y", UserAgent: "Mozilla/5.0 (Linux) Firefox/1", Location: "ET", Size: goatcounter.Floats{42, 666, 2}},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser    system  session                           bot  ref  ref_s  size        loc  first  created_at
-			1       1        foo   A      1      Firefox 1  Linux   00112233445566778899aabbccddef01  0    y    o      42,666,2.0  ET   1      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser    system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        foo   A      1      Firefox 1  Linux   00112233445566778899aabbccddef01  y    o      42     ET   1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -301,10 +348,12 @@ func TestAPICount(t *testing.T) {
 				{Path: "/foo", UserAgent: "Mozilla/5.0 (Linux) Firefox/1", IP: "51.171.91.33"},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser    system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef01  0         NULL   NULL  IE   1      2020-06-18 14:42:00
-			2       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef02  0         NULL   NULL  US   1      2020-06-18 14:42:00
-			3       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef01  0         NULL   NULL  IE   0      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser    system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef01       NULL   NULL   IE   1      2020-06-18 14:42:00
+			2       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef02       NULL   NULL   US   1      2020-06-18 14:42:00
+			3       1        /foo         0      Firefox 1  Linux   00112233445566778899aabbccddef01       NULL   NULL   IE   0      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -316,10 +365,12 @@ func TestAPICount(t *testing.T) {
 				{Path: "/foo", Session: "a"},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser  system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0                       00112233445566778899aabbccddef01  0         NULL   NULL       1      2020-06-18 14:42:00
-			2       1        /foo         0                       00112233445566778899aabbccddef02  0         NULL   NULL       1      2020-06-18 14:42:00
-			3       1        /foo         0                       00112233445566778899aabbccddef01  0         NULL   NULL       0      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL        1      2020-06-18 14:42:00
+			2       1        /foo         0                       00112233445566778899aabbccddef02       NULL   NULL        1      2020-06-18 14:42:00
+			3       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL        0      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -330,8 +381,10 @@ func TestAPICount(t *testing.T) {
 				{Path: "/foo"},
 			}},
 			400, `{"errors":{"1":"session or browser/IP not set; use no_sessions if you don't want to track unique visits"}}`, `
-			hit_id  site_id  path  title  event  browser  system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0                       00112233445566778899aabbccddef01  0         NULL   NULL       1      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL        1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 
@@ -342,9 +395,11 @@ func TestAPICount(t *testing.T) {
 				{Path: "/foo", UserAgent: "curl/7.8"},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser   system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0                        00112233445566778899aabbccddef01  0         NULL   NULL       1      2020-06-18 14:42:00
-			2       1        /foo         0      curl 7.8          00112233445566778899aabbccddef02  7         NULL   NULL       1      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL        1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
+			1        /foo  7    curl/7.8    2020-06-18 14:42:00
 			`,
 		},
 
@@ -353,31 +408,34 @@ func TestAPICount(t *testing.T) {
 			APICountRequest{NoSessions: true, Hits: []APICountRequestHit{
 				{Path: "/foo", IP: "1.1.1.1"},
 			}},
-			202, respOK, ``,
+			202, respOK, empty,
 		},
 		{
 			APICountRequest{NoSessions: true, Filter: []string{"ip"}, Hits: []APICountRequestHit{
 				{Path: "/foo", IP: "1.1.1.1"},
 			}},
-			202, respOK, ``,
+			202, respOK, empty,
 		},
 		{
 			APICountRequest{NoSessions: true, Filter: []string{}, Hits: []APICountRequestHit{
 				{Path: "/foo", IP: "1.2.3.4"},
 			}},
 			202, respOK, `
-			hit_id  site_id  path  title  event  browser  system  session                           bot  ref  ref_s  size  loc  first  created_at
-			1       1        /foo         0                       00112233445566778899aabbccddef01  0         NULL   NULL  AU   1      2020-06-18 14:42:00
+			hit_id  site_id  path  title  event  browser  system  session                           ref  ref_s  width  loc  first  created_at
+			1       1        /foo         0                       00112233445566778899aabbccddef01       NULL   NULL   AU   1      2020-06-18 14:42:00
+
+			site_id  path  bot  user_agent  created_at
 			`,
 		},
 	}
 
-	ztime.SetNow(t, "2020-06-18 14:42:00")
 	perm := goatcounter.APIPermCount
 
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 14:42:00"))
+
 			site := Site(ctx)
 			site.Settings.Collect.Set(goatcounter.CollectHits)
 			site.Settings.IgnoreIPs = []string{"1.1.1.1"}
@@ -411,23 +469,20 @@ func TestAPICount(t *testing.T) {
 					systems.name  || ' ' || systems.version  as system,
 
 					hits.session,
-					hits.bot,
 					refs.ref,
 					refs.ref_scheme as ref_s,
-					sizes.size,
+					hits.width,
 					hits.location as loc,
 					hits.first_visit as first,
 					hits.created_at
 				from hits
 				join paths          using (path_id)
 				left join refs      using (ref_id)
-				left join sizes     using (size_id)
 				join browsers using (browser_id)
 				join systems  using (system_id)
-				order by hit_id asc`))
-			if strings.Count(have, "\n") == 0 { // No data, only the header.
-				have = ""
-			}
+				order by hit_id asc
+			`))
+			have += "\n\n" + zdb.DumpString(ctx, `select * from bots`)
 
 			if d := ztest.Diff(have, tt.want); d != "" {
 				t.Error(d)
@@ -437,34 +492,31 @@ func TestAPICount(t *testing.T) {
 }
 
 func TestAPISitesCreate(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-	now := ztime.Now()
-
 	tests := []struct {
 		serve    bool
 		body     string
 		wantCode int
-		want     func(*goatcounter.Site)
+		want     func(context.Context, *goatcounter.Site)
 	}{
-		{false, `{"code":"apitest"}`, 200, func(s *goatcounter.Site) {
+		{false, `{"code":"apitest"}`, 200, func(ctx context.Context, s *goatcounter.Site) {
 			s.Code = "apitest"
-			s.Parent = ztype.Ptr(int64(1))
+			s.Parent = ztype.Ptr(goatcounter.SiteID(1))
 		}},
-		{true, `{"cname":"apitest.localhost"}`, 200, func(s *goatcounter.Site) {
+		{true, `{"cname":"apitest.localhost"}`, 200, func(ctx context.Context, s *goatcounter.Site) {
 			s.Cname = ztype.Ptr("apitest.localhost")
-			s.Parent = ztype.Ptr(int64(1))
-			s.CnameSetupAt = &now
+			s.Parent = ztype.Ptr(goatcounter.SiteID(1))
+			s.CnameSetupAt = ztype.Ptr(ztime.Now(ctx))
 		}},
 
 		// Ignore plan.
-		{false, `{"code":"apitest"}`, 200, func(s *goatcounter.Site) {
+		{false, `{"code":"apitest"}`, 200, func(ctx context.Context, s *goatcounter.Site) {
 			s.Code = "apitest"
-			s.Parent = ztype.Ptr(int64(1))
+			s.Parent = ztype.Ptr(goatcounter.SiteID(1))
 		}},
-		{true, `{"cname":"apitest.localhost"}`, 200, func(s *goatcounter.Site) {
+		{true, `{"cname":"apitest.localhost"}`, 200, func(ctx context.Context, s *goatcounter.Site) {
 			s.Cname = ztype.Ptr("apitest.localhost")
-			s.Parent = ztype.Ptr(int64(1))
-			s.CnameSetupAt = &now
+			s.Parent = ztype.Ptr(goatcounter.SiteID(1))
+			s.CnameSetupAt = ztype.Ptr(ztime.Now(ctx))
 		}},
 	}
 
@@ -472,6 +524,8 @@ func TestAPISitesCreate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
+
 			goatcounter.Config(ctx).GoatcounterCom = !tt.serve
 
 			r, rr := newAPITest(ctx, t, "PUT", "/api/v0/sites",
@@ -490,7 +544,7 @@ func TestAPISitesCreate(t *testing.T) {
 
 			var w goatcounter.Site
 			w.Defaults(ctx)
-			tt.want(&w)
+			tt.want(ctx, &w)
 
 			w.ID = retSite.ID
 			if tt.serve {
@@ -510,8 +564,6 @@ func TestAPISitesCreate(t *testing.T) {
 }
 
 func TestAPISitesUpdate(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-
 	tests := []struct {
 		serve        bool
 		method, body string
@@ -532,6 +584,7 @@ func TestAPISitesUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("", func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
 			goatcounter.Config(ctx).GoatcounterCom = !tt.serve
 
 			site := Site(ctx)
@@ -569,8 +622,6 @@ func TestAPISitesUpdate(t *testing.T) {
 }
 
 func TestAPIPaths(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-
 	many := func(ctx context.Context, t *testing.T) {
 		p := make(goatcounter.Paths, 50)
 		for i := range p {
@@ -682,6 +733,7 @@ func TestAPIPaths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
 			if tt.setup != nil {
 				tt.setup(ctx, t)
 			}
@@ -698,8 +750,6 @@ func TestAPIPaths(t *testing.T) {
 }
 
 func TestAPIHits(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-
 	many := func(ctx context.Context, t *testing.T) {
 		h := make(goatcounter.Hits, 50)
 		for i := range h {
@@ -935,6 +985,7 @@ func TestAPIHits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
 			if tt.setup != nil {
 				tt.setup(ctx, t)
 			}
@@ -951,8 +1002,6 @@ func TestAPIHits(t *testing.T) {
 }
 
 func TestAPIStats(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-
 	many := func(ctx context.Context, t *testing.T) {
 		h := make(goatcounter.Hits, 50)
 		for i := range h {
@@ -998,6 +1047,7 @@ func TestAPIStats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
 			if tt.setup != nil {
 				tt.setup(ctx, t)
 			}
@@ -1014,8 +1064,6 @@ func TestAPIStats(t *testing.T) {
 }
 
 func TestAPIStatsDetail(t *testing.T) {
-	ztime.SetNow(t, "2020-06-18 12:13:14")
-
 	many := func(ctx context.Context, t *testing.T) {
 		h := make(goatcounter.Hits, 50)
 		for i := range h {
@@ -1062,6 +1110,7 @@ func TestAPIStatsDetail(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := gctest.DB(t)
+			ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18 12:13:14"))
 			if tt.setup != nil {
 				tt.setup(ctx, t)
 			}

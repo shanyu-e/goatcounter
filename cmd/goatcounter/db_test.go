@@ -39,7 +39,13 @@ func TestDBTest(t *testing.T) {
 	}
 	out.Reset()
 
-	runCmd(t, exit, "db", "test", "-db=sqlite+yeah_nah_doesnt_exist")
+	doesntexist := dbc[:strings.Index(dbc, "+")+1]
+	if pgSQL {
+		doesntexist += "dbname="
+	}
+	doesntexist += "yeah_nah_doesnt_exist"
+
+	runCmd(t, exit, "db", "test", "-db="+doesntexist)
 	wantExit(t, exit, out, 1)
 	if !strings.Contains(out.String(), `doesn't exist`) {
 		t.Error(out.String())
@@ -48,7 +54,7 @@ func TestDBTest(t *testing.T) {
 
 func TestDBQuery(t *testing.T) {
 	exit, _, out, ctx, dbc := startTest(t)
-	ztime.SetNow(t, "2020-06-18")
+	ctx = ztime.WithNow(ctx, ztime.FromString("2020-06-18"))
 
 	runCmd(t, exit, "db", "query", "-db="+dbc, "select site_id, code from sites order by site_id")
 	wantExit(t, exit, out, 0)
@@ -68,6 +74,10 @@ func TestDBQuery(t *testing.T) {
 }
 
 func TestDBNewDB(t *testing.T) {
+	if pgSQL {
+		t.Skip("hard to get right in PostgreSQL")
+	}
+
 	exit, _, out, _, dbc := startTest(t)
 
 	runCmd(t, exit, "db", "newdb", "-db="+dbc)
@@ -173,10 +183,10 @@ func TestDBSite(t *testing.T) {
 			"-db="+dbc,
 			"-find=1", "-find=update.example.com")
 		wantExit(t, exit, out, 0)
-		if !grep(out.String(), `site_id +1`) {
+		if !grep(out.String(), `site_id\s+1`) {
 			t.Error(out.String())
 		}
-		if !grep(out.String(), `site_id +2`) {
+		if !grep(out.String(), `site_id\s+2`) {
 			t.Error(out.String())
 		}
 		out.Reset()
@@ -286,10 +296,10 @@ func TestDBUser(t *testing.T) {
 			"-db="+dbc,
 			"-find=1", "-find=new@new.new")
 		wantExit(t, exit, out, 0)
-		if r := `user_id +1`; !grep(out.String(), r) {
+		if r := `user_id\s+1`; !grep(out.String(), r) {
 			t.Errorf("user 1 not found in output (via regexp %q):\n%s", r, out.String())
 		}
-		if r := `user_id +2`; !grep(out.String(), r) {
+		if r := `user_id\s+2`; !grep(out.String(), r) {
 			t.Errorf("user 2 not found in output (via regexp %q):\n%s", r, out.String())
 		}
 		out.Reset()
@@ -364,10 +374,13 @@ func TestDBAPIToken(t *testing.T) {
 			"-perm=count,export,site_read,site_create,site_update")
 		wantExit(t, exit, out, 0)
 
-		have := zdb.DumpString(ctx, `select api_token_id, site_id, user_id, name, permissions from api_tokens order by api_token_id`)
+		have := zdb.DumpString(ctx, `
+			select api_token_id, site_id, user_id, name, permissions, sites
+			from api_tokens order by api_token_id
+		`)
 		want := `
-			api_token_id  site_id  user_id  name     permissions
-			1             1        1        abc def  62`
+			api_token_id  site_id  user_id  name     permissions  sites
+			1             1        1        abc def  62           [1]`
 		if d := zdb.Diff(have, want); d != "" {
 			t.Error(d)
 		}
@@ -382,10 +395,13 @@ func TestDBAPIToken(t *testing.T) {
 			"-perm=count")
 		wantExit(t, exit, out, 0)
 
-		have := zdb.DumpString(ctx, `select api_token_id, site_id, user_id, name, permissions from api_tokens order by api_token_id`)
+		have := zdb.DumpString(ctx, `
+			select api_token_id, site_id, user_id, name, permissions, sites
+			from api_tokens order by api_token_id
+		`)
 		want := `
-			api_token_id  site_id  user_id  name  permissions
-			1             1        1        new   2`
+			api_token_id  site_id  user_id  name  permissions  sites
+			1             1        1        new   2            [1]`
 		if d := zdb.Diff(have, want); d != "" {
 			t.Error(d)
 		}

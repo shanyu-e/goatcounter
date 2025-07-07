@@ -5,10 +5,8 @@ import (
 
 	"context"
 	"encoding/base32"
-	"encoding/base64"
 	"fmt"
 	"html/template"
-	"image/png"
 	"io/fs"
 	"math"
 	"reflect"
@@ -17,11 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/boombuler/barcode"
-	"github.com/boombuler/barcode/qr"
 	"github.com/russross/blackfriday/v2"
 	"zgo.at/errors"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/log"
+	"zgo.at/otp"
 	"zgo.at/z18n"
 	"zgo.at/zhttp"
 	"zgo.at/zstd/zfs"
@@ -116,7 +113,7 @@ func init() {
 	tplfunc.Add("validate", zvalidate.TemplateError)
 	tplfunc.Add("has_errors", zvalidate.TemplateHasErrors)
 	tplfunc.Add("error_code", func(err error) string { return zhttp.UserErrorCode(err) })
-	tplfunc.Add("parent_site", func(ctx context.Context, id *int64) string {
+	tplfunc.Add("parent_site", func(ctx context.Context, id *SiteID) string {
 		var s Site
 		err := s.ByID(ctx, *id)
 		if err != nil {
@@ -314,31 +311,14 @@ func init() {
 		return tplfunc.Number(n, u.Settings.NumberFormat)
 	})
 
-	tplfunc.Add("totp_barcode", func(email, s string) template.HTML {
-		qrCode, err := qr.Encode(
-			fmt.Sprintf("otpauth://totp/GoatCounter:%s?secret=%s&issuer=GoatCounter", email, s),
-			qr.M, qr.Auto)
+	tplfunc.Add("totp_barcode", func(email string, secret []byte) template.HTML {
+		img, err := otp.URL(secret, "GoatCounter", email).PNGDataURL(200)
 		if err != nil {
 			log.Error(context.Background(), errors.Wrap(err, "encoding QR code"))
 			return template.HTML("Error generating the QR code; this has been logged for investigation.")
 		}
-
-		qrCode, err = barcode.Scale(qrCode, 200, 200)
-		if err != nil {
-			log.Error(context.Background(), errors.Wrap(err, "scaling QR code"))
-			return template.HTML("Error generating the QR code; this has been logged for investigation.")
-		}
-
-		buf := bytes.NewBufferString("data:image/png;base64,")
-		err = png.Encode(base64.NewEncoder(base64.StdEncoding, buf), qrCode)
-		if err != nil {
-			log.Error(context.Background(), errors.Wrap(err, "encoding QR code as PNG"))
-			return template.HTML("Error generating the QR code; this has been logged for investigation.")
-		}
-
 		return template.HTML(fmt.Sprintf(
-			`<img alt="TOTP Secret Barcode" title="TOTP Secret Barcode" src="%s">`,
-			buf.String()))
+			`<img alt="TOTP Secret Barcode" title="TOTP Secret Barcode" src="%s">`, img))
 	})
 }
 
@@ -393,7 +373,7 @@ var textSymbols = []rune{
 	'█',      // U+2588 FULL BLOCK
 }
 
-func textChart(ctx context.Context, stats []HitListStat, max int, daily bool) template.HTML {
+func textChart(ctx context.Context, stats []HitListStat, max int) template.HTML {
 	_, chunked := ChunkStat(stats)
 	symb := make([]rune, 0, 12)
 	for _, chunk := range chunked {
@@ -437,10 +417,8 @@ func HorizontalChart(ctx context.Context, stats HitStats, total int, link, pagin
 			switch s.ID {
 			case sizePhones:
 				name = z18n.T(ctx, "label/size-phones|Phones")
-			case sizeLargePhones:
-				name = z18n.T(ctx, "label/size-largephones|Large phones, small tablets")
 			case sizeTablets:
-				name = z18n.T(ctx, "label/size-tablets|Tablets and small laptops")
+				name = z18n.T(ctx, "label/size-tablets|Tablets and large phones")
 			case sizeDesktop:
 				name = z18n.T(ctx, "label/size-desktop|Computer monitors")
 			case sizeDesktopHD:

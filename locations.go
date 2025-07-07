@@ -1,55 +1,20 @@
 package goatcounter
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"io"
 	"net"
 	"strings"
 
-	"github.com/oschwald/geoip2-golang"
-	"github.com/oschwald/maxminddb-golang"
 	"zgo.at/errors"
-	"zgo.at/goatcounter/v2/log"
+	"zgo.at/goatcounter/v2/pkg/geo"
+	"zgo.at/goatcounter/v2/pkg/log"
 	"zgo.at/zdb"
 )
 
-var geodb *geoip2.Reader
-
-// InitGeoDB sets up the geoDB database located at the given path.
-//
-// The database can be the "Countries" or "Cities" version.
-//
-// It will use the embeded "Countries" database if path is an empty string.
-func InitGeoDB(path string) (maxminddb.Metadata, error) {
-	if path != "" {
-		var err error
-		geodb, err = geoip2.Open(path)
-		if err != nil {
-			return maxminddb.Metadata{}, err
-		}
-		GeoDB = nil // Save some memory.
-		return geodb.DB().Metadata, nil
-	}
-
-	gz, err := gzip.NewReader(bytes.NewReader(GeoDB))
-	if err != nil {
-		return maxminddb.Metadata{}, err
-	}
-	d, err := io.ReadAll(gz)
-	if err != nil {
-		return maxminddb.Metadata{}, err
-	}
-	geodb, err = geoip2.FromBytes(d)
-	if err != nil {
-		return maxminddb.Metadata{}, err
-	}
-	return geodb.DB().Metadata, nil
-}
+type LocationID int32
 
 type Location struct {
-	ID int64 `db:"location_id"`
+	ID LocationID `db:"location_id"`
 
 	Country     string `db:"country"`
 	Region      string `db:"region"`
@@ -64,7 +29,7 @@ type Location struct {
 // ByCode gets a location by ISO-3166-2 code; e.g. "US" or "US-TX".
 func (l *Location) ByCode(ctx context.Context, code string) error {
 	if ll, ok := cacheLoc(ctx).Get(code); ok {
-		*l = *ll.(*Location)
+		*l = *ll
 		return nil
 	}
 
@@ -72,14 +37,14 @@ func (l *Location) ByCode(ctx context.Context, code string) error {
 	if zdb.ErrNoRows(err) {
 		l.ISO3166_2 = code
 		l.Country, l.Region, _ = strings.Cut(code, "-")
-		l.CountryName, l.RegionName = findGeoName(l.Country, l.Region)
+		l.CountryName, l.RegionName = findGeoName(ctx, l.Country, l.Region)
 		err = l.insert(ctx)
 	}
 	if err != nil {
 		return errors.Wrap(err, "Location.ByCode")
 	}
 
-	cacheLoc(ctx).SetDefault(l.ISO3166_2, l)
+	cacheLoc(ctx).Set(l.ISO3166_2, l)
 	return nil
 }
 
@@ -87,8 +52,9 @@ func (l *Location) ByCode(ctx context.Context, code string) error {
 //
 // This will insert a row in the locations table if one doesn't exist yet.
 func (l *Location) Lookup(ctx context.Context, ip string) error {
+	geodb := geo.Get(ctx)
 	if geodb == nil {
-		panic("Location.Lookup: geo.Init not called")
+		return errors.New("Location.Lookup: no geodb on context")
 	}
 
 	loc, err := geodb.City(net.ParseIP(ip))
@@ -106,7 +72,7 @@ func (l *Location) Lookup(ctx context.Context, ip string) error {
 		l.ISO3166_2 += "-" + l.Region
 	}
 	if ll, ok := cacheLoc(ctx).Get(l.ISO3166_2); ok {
-		*l = *ll.(*Location)
+		*l = *ll
 		return nil
 	}
 
@@ -120,7 +86,7 @@ func (l *Location) Lookup(ctx context.Context, ip string) error {
 		return errors.Wrap(err, "Location.Lookup")
 	}
 
-	cacheLoc(ctx).SetDefault(l.ISO3166_2, l)
+	cacheLoc(ctx).Set(l.ISO3166_2, l)
 	return nil
 }
 
@@ -134,7 +100,7 @@ func (l Location) LookupIP(ctx context.Context, ip string) string {
 }
 
 func (l *Location) insert(ctx context.Context) (err error) {
-	l.ID, err = zdb.InsertID(ctx, "location_id",
+	l.ID, err = zdb.InsertID[LocationID](ctx, "location_id",
 		`insert into locations (country, region, country_name, region_name) values (?, ?, ?, ?)`,
 		l.Country, l.Region, l.CountryName, l.RegionName)
 	if err != nil {
@@ -167,7 +133,12 @@ func (l *Locations) ListCountries(ctx context.Context) error {
 // (Countries is much faster, ~100ms) which is not a great worst case scenario,
 // but in most cases it should be (much) faster, and this should get called
 // extremely infrequently anyway, if ever.
-func findGeoName(country, region string) (string, string) {
+func findGeoName(ctx context.Context, country, region string) (string, string) {
+	geodb := geo.Get(ctx)
+	if geodb == nil {
+		panic("Location.Lookup: ")
+	}
+
 	hasRegions := geodb.Metadata().DatabaseType == "City"
 	iter := geodb.DB().Data()
 	for iter.Next() {
