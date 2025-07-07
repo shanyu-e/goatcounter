@@ -4,3 +4,4 @@
 /goatcounter-data
 .env
 *.log
+.vscode/launch.json
