@@ -1,6 +1,6 @@
 {
   "terminal.integrated.env.linux": {
-    "PATH": "/usr/local/go/bin:/root/go/bin:${env:PATH}",
+    "PATH": "/root/.gvm/gos/go1.24.4/bin:/usr/local/go/bin:/root/go/bin:${env:PATH}",
     "PROJECT_ENV": "development"
   },
   "remote.extensionKind": {
